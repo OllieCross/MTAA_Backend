@@ -1,22 +1,54 @@
 import os
+import jwt
+import datetime
+import bcrypt
+from functools import wraps
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import psycopg2
 
-load_dotenv()  # loads variables from .env file into environment
+# Načítanie .env premenných
+load_dotenv()
 app = Flask(__name__)
+SECRET_KEY = os.environ.get("SECRET_KEY")
 url = os.environ.get("DATABASE_URL")
-connection = psycopg2.connect(url)# gets variables from environment
+connection = psycopg2.connect(url)
 
+# Dekorátor na overenie JWT tokenu
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        if 'Authorization' in request.headers:
+            bearer = request.headers['Authorization']
+            token = bearer.split(" ")[1] if " " in bearer else bearer
+
+        if not token:
+            return jsonify({'message': 'Token is missing!'}), 401
+
+        try:
+            data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+            request.user = data
+        except jwt.ExpiredSignatureError:
+            return jsonify({'message': 'Token expired'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'message': 'Invalid token'}), 401
+
+        return f(*args, **kwargs)
+    return decorated
+
+# Testovací endpoint
 @app.get("/default")
-def create_room():
+@token_required
+def default():
+    user_data = request.user  # získané z tokenu
+    return jsonify({
+        "message": "Access granted",
+        "user_id": user_data['uid'],
+        "role": user_data['role']
+    }), 200
 
-    with connection.cursor(url) as cursor:
-        cursor.execute(("SELECT * FROM movies;"))
-        result = cursor.fetchall()
-    return {"connection successful": result }, 201
-
-
+# LOGIN s generovaním JWT tokenu
 @app.route('/login', methods=['POST'])
 def login():
     data = request.json
@@ -26,16 +58,61 @@ def login():
     try:
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT * FROM users WHERE email = %s AND password = %s;",
-                (email, password)
+                "SELECT uid, password, role FROM users WHERE email = %s;",
+                (email,)
             )
             user = cursor.fetchone()
 
         if user:
-            return jsonify({'success': True, 'message': 'Login successful'}), 200
+            uid, hashed_pw, role = user
+
+            if bcrypt.checkpw(password.encode('utf-8'), hashed_pw.encode('utf-8')):
+                token = jwt.encode({
+                    'uid': uid,
+                    'role': role,
+                    'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+                }, SECRET_KEY, algorithm='HS256')
+
+                return jsonify({'success': True, 'token': token}), 200
+            else:
+                return jsonify({'success': False, 'message': 'Invalid password'}), 401
         else:
-            return jsonify({'success': False, 'message': 'Invalid credentials'}), 401
+            return jsonify({'success': False, 'message': 'User not found'}), 404
 
     except Exception as e:
         print("Error during login:", e)
         return jsonify({'success': False, 'message': 'Server error'}), 500
+
+# REGISTRÁCIA používateľa
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+    role = data.get('role', 'guest')
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM users WHERE email = %s;", (email,))
+            existing_user = cursor.fetchone()
+
+            if existing_user:
+                return jsonify({'success': False, 'message': 'User already exists'}), 409
+
+            hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode()
+
+            cursor.execute(
+                "INSERT INTO users (email, password, role) VALUES (%s, %s, %s);",
+                (email, hashed_pw, role)
+            )
+            connection.commit()
+
+        return jsonify({'success': True, 'message': 'Registration successful'}), 201
+
+    except Exception as e:
+        print("Error during registration:", e)
+        return jsonify({'success': False, 'message': 'Server error'}), 500
+
+# Spustenie servera
+if __name__ == '__main__':
+    app.run(debug=True)
