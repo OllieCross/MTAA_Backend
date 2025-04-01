@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import psycopg2
 import requests
-
+#gfdgfdg
 # Načítanie .env premenných
 load_dotenv()
 app = Flask(__name__)
