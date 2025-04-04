@@ -8,12 +8,22 @@ from flask import Flask, request, jsonify
 import psycopg2
 import requests
 
+##ABY BEZALO NA CHROME
+from flask_cors import CORS
+
+
+
+
 # Načítanie .env premenných
 load_dotenv()
 app = Flask(__name__)
+CORS(app)##ABY BEZALO NA CHROME
 SECRET_KEY = os.environ.get("SECRET_KEY")
 url = os.environ.get("DATABASE_URL")
 connection = psycopg2.connect(url)
+
+
+
 
 # Dekorátor na overenie JWT tokenu
 def token_required(f):
@@ -166,7 +176,6 @@ def geocode_address_full(address):
         return lat, lon, city, country
     else:
         return None, None, "", ""
-
 @app.route('/add-accommodation', methods=['POST'])
 @token_required
 def add_accommodation():
@@ -176,11 +185,12 @@ def add_accommodation():
         price = request.form.get("price")
         address = request.form.get("address")
         description = request.form.get("description")
+        iban = request.form.get("iban")  # Pridanie IBAN
         images = request.files.getlist("images")
 
         latitude, longitude, location_city, location_country = geocode_address_full(address)
 
-        if not all([name, location_city, location_country, max_guests, price, latitude, longitude, description]):
+        if not all([name, location_city, location_country, max_guests, price, latitude, longitude, description, iban]):
             return jsonify({'success': False, 'message': 'Missing required fields'}), 400
 
         if not images or len(images) < 3:
@@ -190,13 +200,13 @@ def add_accommodation():
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO accommodations
-                (name, location_city, location_country, owner, max_guests, latitude, longitude, pricepn, description)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (name, location_city, location_country, owner, max_guests, latitude, longitude, pricepn, description, iban)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING aid;
             """, (
                 name, location_city, location_country,
                 request.user['uid'], max_guests, latitude, longitude,
-                price, description
+                price, description, iban
             ))
             aid = cur.fetchone()[0]
 
@@ -223,11 +233,12 @@ def edit_accommodation(aid):
         price = request.form.get("price")
         address = request.form.get("address")
         description = request.form.get("description")
+        iban = request.form.get("iban")  # Pridanie IBAN
         images = request.files.getlist("images")
 
         latitude, longitude, location_city, location_country = geocode_address_full(address)
 
-        if not all([name, location_city, location_country, max_guests, price, latitude, longitude, description]):
+        if not all([name, location_city, location_country, max_guests, price, latitude, longitude, description, iban]):
             return jsonify({'success': False, 'message': 'Missing required fields'}), 400
 
         if not images or len(images) < 3:
@@ -249,12 +260,13 @@ def edit_accommodation(aid):
                     pricepn = %s,
                     latitude = %s,
                     longitude = %s,
-                    description = %s
+                    description = %s,
+                    iban = %s
                 WHERE aid = %s;
             """, (
                 name, location_city, location_country,
                 max_guests, price, latitude, longitude,
-                description, aid
+                description, iban, aid
             ))
 
             cursor.execute("DELETE FROM pictures WHERE aid = %s;", (aid,))
@@ -693,6 +705,76 @@ def search_accommodations():
     except Exception as e:
         connection.rollback()
         print("Search accommodations error:", e)
+        return jsonify({
+            "success": False,
+            "message": "Server error",
+            "error": str(e)
+        }), 500
+
+
+@app.route('/accommodation-confirmation/<int:aid>', methods=['GET'])
+@token_required
+def accommodation_confirmation(aid):
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT pricepn, iban FROM accommodations WHERE aid = %s;
+            """, (aid,))
+            accommodation = cursor.fetchone()
+
+            if not accommodation:
+                return jsonify({'success': False, 'message': 'Accommodation not found'}), 404
+
+            price, iban = accommodation
+            return jsonify({'success': True, 'price': price, 'iban': iban}), 200
+
+    except Exception as e:
+        print("Accommodation confirmation error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+
+@app.route('/main-screen-accommodations', methods=['GET'])
+@token_required
+def main_screen_accommodations():
+    try:
+        with connection.cursor() as cursor:
+            query = """
+                SELECT
+                    a.aid,
+                    a.name,
+                    a.pricepn,
+                    a.location_city,
+                    a.location_country,
+                    (
+                        SELECT encode(image, 'base64')
+                        FROM pictures
+                        WHERE aid = a.aid
+                        ORDER BY pid ASC
+                        LIMIT 1
+                    ) AS image_base64
+                FROM accommodations a
+                ORDER BY RANDOM()
+                LIMIT 5;
+            """
+            cursor.execute(query)
+            accommodations = cursor.fetchall()
+
+            result = [
+                {
+                    "aid": aid,
+                    "name": name,
+                    "price_per_night": price,
+                    "location": f"{city}, {country}",
+                    "image_base64": image
+                }
+                for aid, name, price, city, country, image in accommodations
+            ]
+
+        return jsonify({"success": True, "results": result}), 200
+
+    except Exception as e:
+        connection.rollback()
+        print("Main screen accommodations error:", e)
         return jsonify({
             "success": False,
             "message": "Server error",
