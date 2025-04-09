@@ -302,8 +302,6 @@ def like_dislike_accommodation():
         print("Like error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
-
-
 @app.route('/liked-accommodations', methods=['GET'])
 @token_required
 def get_liked_accommodations():
@@ -385,4 +383,89 @@ def get_address_from_coordinates():
 
     except Exception as e:
         print("Reverse geocoding error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+@app.route('/accommodation/<int:aid>', methods=['GET'])
+@token_required
+def get_accommodation_details(aid):
+    try:
+        with connection.cursor() as cursor:
+            # Získaj základné info o ubytovaní + priemerné hodnotenie
+            cursor.execute("""
+                SELECT 
+                    a.name,
+                    a.location_city,
+                    a.location_country,
+                    a.max_guests,
+                    a.latitude,
+                    a.longitude,
+                    a.pricepn,
+                    a.description,
+                    u.email AS owner_email,
+                    ROUND(AVG(r.rating), 2) AS avg_rating
+                FROM accommodations a
+                JOIN users u ON u.uid = a.owner
+                LEFT JOIN reviews r ON a.aid = r.aid
+                WHERE a.aid = %s
+                GROUP BY a.aid, u.email;
+            """, (aid,))
+            result = cursor.fetchone()
+
+            if not result:
+                return jsonify({'success': False, 'message': 'Accommodation not found'}), 404
+
+            (name, city, country, guests, lat, lon, price, desc, owner_email, avg_rating) = result
+
+            # Získaj 3 obrázky
+            cursor.execute("""
+                SELECT encode(image, 'base64') 
+                FROM pictures 
+                WHERE aid = %s 
+                ORDER BY pid 
+                LIMIT 3;
+            """, (aid,))
+            images = [row[0] for row in cursor.fetchall()]
+
+        return jsonify({
+            'success': True,
+            'accommodation': {
+                'aid': aid,
+                'name': name,
+                'location': f"{city}, {country}",
+                'max_guests': guests,
+                'latitude': lat,
+                'longitude': lon,
+                'price_per_night': price,
+                'description': desc,
+                'owner_email': owner_email,
+                'average_rating': avg_rating if avg_rating is not None else 0.0,
+                'images_base64': images
+            }
+        }), 200
+
+    except Exception as e:
+        print("Get accommodation detail error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+@app.route('/accommodation-gallery/<int:aid>', methods=['GET'])
+@token_required
+def get_accommodation_gallery(aid):
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT encode(image, 'base64')
+                FROM pictures
+                WHERE aid = %s
+                ORDER BY pid;
+            """, (aid,))
+            images = [row[0] for row in cursor.fetchall()]
+
+        return jsonify({
+            'success': True,
+            'aid': aid,
+            'images_base64': images
+        }), 200
+
+    except Exception as e:
+        print("Get accommodation gallery error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
