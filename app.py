@@ -140,3 +140,73 @@ def register():
     except Exception as e:
         print("Error during registration:", e)
         return jsonify({'success': False, 'message': 'Server error'}), 500
+
+
+def geocode_address_full(address):
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        'q': address,
+        'format': 'json',
+        'limit': 1,
+        'addressdetails': 1
+    }
+    headers = {
+        'User-Agent': 'mtaa-app/1.0'
+    }
+
+    response = requests.get(url, params=params, headers=headers)
+    data = response.json()
+
+    if data:
+        lat = float(data[0]['lat'])
+        lon = float(data[0]['lon'])
+        address_info = data[0].get("address", {})
+        city = address_info.get("city") or address_info.get("town") or address_info.get("village") or ""
+        country = address_info.get("country") or ""
+        return lat, lon, city, country
+    else:
+        return None, None, "", ""
+@app.route('/add-accommodation', methods=['POST'])
+@token_required
+def add_accommodation():
+    try:
+        name = request.form.get("name")
+        max_guests = request.form.get("guests")
+        price = request.form.get("price")
+        address = request.form.get("address")
+        description = request.form.get("description")
+        iban = request.form.get("iban")  # Pridanie IBAN
+        images = request.files.getlist("images")
+
+        latitude, longitude, location_city, location_country = geocode_address_full(address)
+
+        if not all([name, location_city, location_country, max_guests, price, latitude, longitude, description, iban]):
+            return jsonify({'success': False, 'message': 'Missing required fields'}), 400
+
+        if not images or len(images) < 3:
+            return jsonify({'success': False, 'message': 'At least 3 images are required'}), 400
+
+        conn = psycopg2.connect(url)
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO accommodations
+                (name, location_city, location_country, owner, max_guests, latitude, longitude, pricepn, description, iban)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING aid;
+            """, (
+                name, location_city, location_country,
+                request.user['uid'], max_guests, latitude, longitude,
+                price, description, iban
+            ))
+            aid = cur.fetchone()[0]
+
+            for img in images:
+                cur.execute("INSERT INTO pictures (aid, image) VALUES (%s, %s);", (aid, psycopg2.Binary(img.read())))
+
+            conn.commit()
+
+        return jsonify({'success': True, 'message': 'Accommodation added', 'aid': aid}), 201
+
+    except Exception as e:
+        print("Accommodation upload error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
