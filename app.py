@@ -110,3 +110,33 @@ def delete_accommodation(aid):
     except Exception as e:
         print("Delete accommodation error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+# REGISTRÁCIA používateľa
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+    role = data.get('role', 'guest')
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM users WHERE email = %s;", (email,))
+            existing_user = cursor.fetchone()
+
+            if existing_user:
+                return jsonify({'success': False, 'message': 'User already exists'}), 409
+
+            hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode()
+
+            cursor.execute(
+                "INSERT INTO users (email, password, role) VALUES (%s, %s, %s);",
+                (email, hashed_pw, role)
+            )
+            connection.commit()
+
+        return jsonify({'success': True, 'message': 'Registration successful'}), 201
+
+    except Exception as e:
+        print("Error during registration:", e)
+        return jsonify({'success': False, 'message': 'Server error'}), 500
