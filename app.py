@@ -83,3 +83,30 @@ def login():
     except Exception as e:
         print("Error during login:", e)
         return jsonify({'success': False, 'message': 'Server error'}), 500
+
+
+@app.route('/delete-accommodation/<int:aid>', methods=['DELETE'])
+@token_required
+def delete_accommodation(aid):
+    uid = request.user['uid']
+
+    try:
+        with connection.cursor() as cursor:
+            # Skontroluj, či používateľ je vlastníkom ubytovania
+            cursor.execute("SELECT * FROM accommodations WHERE aid = %s AND owner = %s;", (aid, uid))
+            acc = cursor.fetchone()
+
+            if not acc:
+                return jsonify({'success': False, 'message': 'Accommodation not found or unauthorized'}), 404
+
+            # Najprv vymaž obrázky
+            cursor.execute("DELETE FROM pictures WHERE aid = %s;", (aid,))
+            # Potom vymaž ubytovanie
+            cursor.execute("DELETE FROM accommodations WHERE aid = %s;", (aid,))
+            connection.commit()
+
+        return jsonify({'success': True, 'message': f'Accommodation {aid} deleted'}), 200
+
+    except Exception as e:
+        print("Delete accommodation error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
