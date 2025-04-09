@@ -700,7 +700,6 @@ def search_accommodations():
             "error": str(e)
         }), 500
 
-
 @app.route('/accommodation-confirmation/<int:aid>', methods=['GET'])
 @token_required
 def accommodation_confirmation(aid):
