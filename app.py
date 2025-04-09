@@ -84,7 +84,6 @@ def login():
         print("Error during login:", e)
         return jsonify({'success': False, 'message': 'Server error'}), 500
 
-
 @app.route('/delete-accommodation/<int:aid>', methods=['DELETE'])
 @token_required
 def delete_accommodation(aid):
@@ -470,8 +469,6 @@ def get_accommodation_gallery(aid):
         print("Get accommodation gallery error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
-
-
 @app.route('/make-reservation', methods=['POST'])
 @token_required
 def make_reservation():
@@ -534,4 +531,80 @@ def delete_reservation(rid):
 
     except Exception as e:
         print("Delete reservation error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+@app.route('/my-accommodations', methods=['GET'])
+@token_required
+def get_my_accommodations():
+    uid = request.user['uid']
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT 
+                    a.aid,
+                    a.name,
+                    a.location_city,
+                    a.location_country,
+                    (
+                        SELECT encode(image, 'base64') 
+                        FROM pictures 
+                        WHERE aid = a.aid 
+                        ORDER BY pid ASC 
+                        LIMIT 1
+                    ) AS image_base64
+                FROM accommodations a
+                WHERE a.owner = %s;
+            """, (uid,))
+            results = cursor.fetchall()
+
+        accommodations = []
+        for row in results:
+            aid, name, city, country, image_base64 = row
+            accommodations.append({
+                'aid': aid,
+                'name': name,
+                'city': city,
+                'country': country,
+                'image_base64': image_base64
+            })
+
+        return jsonify({'success': True, 'accommodations': accommodations}), 200
+
+    except Exception as e:
+        print("Get my accommodations error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+@app.route('/my-reservations', methods=['GET'])
+@token_required
+def get_my_reservations():
+    uid = request.user['uid']
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT 
+                    r.rid,
+                    r.aid,
+                    a.location_city,
+                    a.location_country
+                FROM reservations r
+                JOIN accommodations a ON r.aid = a.aid
+                WHERE r.reserved_by = %s;
+            """, (uid,))
+            reservations = cursor.fetchall()
+
+        result = []
+        for rid, aid, city, country in reservations:
+            result.append({
+                "rid": rid,
+                "aid": aid,
+                "city": city,
+                "country": country
+            })
+
+        return jsonify({'success': True, 'reservations': result}), 200
+
+    except Exception as e:
+        print("Get my reservations error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
