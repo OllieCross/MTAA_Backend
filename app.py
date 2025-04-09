@@ -301,3 +301,88 @@ def like_dislike_accommodation():
     except Exception as e:
         print("Like error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+
+
+@app.route('/liked-accommodations', methods=['GET'])
+@token_required
+def get_liked_accommodations():
+    uid = request.user['uid']
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT 
+                    a.aid,
+                    a.name,
+                    a.location_city,
+                    a.location_country,
+                    a.pricepn,
+                    r.rating,
+                    (
+                        SELECT encode(image, 'base64') 
+                        FROM pictures 
+                        WHERE aid = a.aid 
+                        ORDER BY pid ASC 
+                        LIMIT 1
+                    ) AS image_base64
+                FROM liked l
+                JOIN accommodations a ON a.aid = l.aid
+                LEFT JOIN (
+                    SELECT aid, ROUND(AVG(rating), 2) AS rating 
+                    FROM reviews 
+                    GROUP BY aid
+                ) r ON a.aid = r.aid
+                WHERE l.uid = %s
+                LIMIT 20;
+            """, (uid,))
+            results = cursor.fetchall()
+
+        accommodations = []
+        for row in results:
+            aid, name, city, country, price, rating, image_base64 = row
+            accommodations.append({
+                'aid': aid,
+                'name': name,
+                'location': f"{city}, {country}",
+                'price_per_night': price,
+                'rating': rating if rating else 0.0,
+                'image_base64': image_base64
+            })
+
+        return jsonify({'success': True, 'liked_accommodations': accommodations}), 200
+
+    except Exception as e:
+        print("Get liked accommodations error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+# PRE GPS POZIADAVKU
+@app.route('/get-address', methods=['POST'])
+def get_address_from_coordinates():
+    data = request.json
+    lat = data.get('latitude')
+    lon = data.get('longitude')
+
+    if not lat or not lon:
+        return jsonify({'success': False, 'message': 'Missing coordinates'}), 400
+
+    try:
+        url = 'https://nominatim.openstreetmap.org/reverse'
+        params = {
+            'format': 'json',
+            'lat': lat,
+            'lon': lon
+        }
+        headers = {
+            'User-Agent': 'mtaa-app/1.0'
+        }
+
+        response = requests.get(url, params=params, headers=headers)
+        result = response.json()
+
+        address = result.get('display_name', 'Unknown location')
+        return jsonify({'success': True, 'address': address}), 200
+
+    except Exception as e:
+        print("Reverse geocoding error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
