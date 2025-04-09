@@ -609,7 +609,6 @@ def get_my_reservations():
         print("Get my reservations error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
-
 @app.route('/search-accommodations', methods=['POST'])
 @token_required
 def search_accommodations():
@@ -719,3 +718,55 @@ def accommodation_confirmation(aid):
     except Exception as e:
         print("Accommodation confirmation error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+@app.route('/main-screen-accommodations', methods=['GET'])
+@token_required
+def main_screen_accommodations():
+    try:
+        with connection.cursor() as cursor:
+            query = """
+                SELECT
+                    a.aid,
+                    a.name,
+                    a.pricepn,
+                    a.location_city,
+                    a.location_country,
+                    (
+                        SELECT encode(image, 'base64')
+                        FROM pictures
+                        WHERE aid = a.aid
+                        ORDER BY pid ASC
+                        LIMIT 1
+                    ) AS image_base64
+                FROM accommodations a
+                ORDER BY RANDOM()
+                LIMIT 5;
+            """
+            cursor.execute(query)
+            accommodations = cursor.fetchall()
+
+            result = [
+                {
+                    "aid": aid,
+                    "name": name,
+                    "price_per_night": price,
+                    "location": f"{city}, {country}",
+                    "image_base64": image
+                }
+                for aid, name, price, city, country, image in accommodations
+            ]
+
+        return jsonify({"success": True, "results": result}), 200
+
+    except Exception as e:
+        connection.rollback()
+        print("Main screen accommodations error:", e)
+        return jsonify({
+            "success": False,
+            "message": "Server error",
+            "error": str(e)
+        }), 500
+
+# Spustenie servera
+if __name__ == '__main__':
+    app.run(debug=False)
