@@ -608,3 +608,115 @@ def get_my_reservations():
     except Exception as e:
         print("Get my reservations error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+
+@app.route('/search-accommodations', methods=['POST'])
+@token_required
+def search_accommodations():
+    data = request.json
+    location = data.get("location")  # napr. "Zagreb"
+    date_from = data.get("from")
+    date_to = data.get("to")
+    guests = data.get("guests")
+
+    latitude = longitude = None
+    if location:
+        lat, lon, _, _ = geocode_address_full(location)
+        latitude, longitude = lat, lon
+
+    try:
+        with connection.cursor() as cursor:
+            query = """
+                SELECT
+                    a.aid,
+                    a.name,
+                    a.pricepn,
+                    a.location_city,
+                    a.location_country,
+                    a.latitude,
+                    a.longitude,
+                    (
+                        SELECT encode(image, 'base64')
+                        FROM pictures
+                        WHERE aid = a.aid
+                        ORDER BY pid ASC
+                        LIMIT 1
+                    ) AS image_base64
+                FROM accommodations a
+                WHERE TRUE
+            """
+            params = []
+
+            # Filtrovanie podľa počtu hostí
+            if guests:
+                query += " AND a.max_guests >= %s"
+                params.append(guests)
+
+            # Filtrovanie podľa vzdialenosti (Haversine formula)
+            if latitude and longitude:
+                query += """
+                    AND (
+                        6371000 * acos(
+                            cos(radians(%s)) * cos(radians(a.latitude)) *
+                            cos(radians(a.longitude) - radians(%s)) +
+                            sin(radians(%s)) * sin(radians(a.latitude))
+                        )
+                    ) < 50000
+                """
+                params.extend([latitude, longitude, latitude])
+
+            cursor.execute(query, tuple(params))
+            accommodations = cursor.fetchall()
+
+            result = []
+            for aid, name, price, city, country, lat, lon, image in accommodations:
+                # Over dostupnosť podľa dátumov
+                if date_from and date_to:
+                    cursor.execute("""
+                        SELECT 1 FROM reservations
+                        WHERE aid = %s
+                        AND NOT (%s > "To" OR %s < "From")
+                    """, (aid, date_from, date_to))
+                    reserved = cursor.fetchone()
+                    if reserved:
+                        continue
+
+                result.append({
+                    "aid": aid,
+                    "name": name,
+                    "price_per_night": price,
+                    "location": f"{city}, {country}",
+                    "image_base64": image
+                })
+
+        return jsonify({"success": True, "results": result}), 200
+
+    except Exception as e:
+        connection.rollback()
+        print("Search accommodations error:", e)
+        return jsonify({
+            "success": False,
+            "message": "Server error",
+            "error": str(e)
+        }), 500
+
+
+@app.route('/accommodation-confirmation/<int:aid>', methods=['GET'])
+@token_required
+def accommodation_confirmation(aid):
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT pricepn, iban FROM accommodations WHERE aid = %s;
+            """, (aid,))
+            accommodation = cursor.fetchone()
+
+            if not accommodation:
+                return jsonify({'success': False, 'message': 'Accommodation not found'}), 404
+
+            price, iban = accommodation
+            return jsonify({'success': True, 'price': price, 'iban': iban}), 200
+
+    except Exception as e:
+        print("Accommodation confirmation error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
