@@ -469,3 +469,69 @@ def get_accommodation_gallery(aid):
     except Exception as e:
         print("Get accommodation gallery error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+
+
+@app.route('/make-reservation', methods=['POST'])
+@token_required
+def make_reservation():
+    data = request.json
+    aid = data.get("aid")
+    date_from = data.get("from")
+    date_to = data.get("to")
+    uid = request.user['uid']
+
+    if not all([aid, date_from, date_to]):
+        return jsonify({'success': False, 'message': 'Missing required fields'}), 400
+
+    try:
+        with connection.cursor() as cursor:
+            # Over, či dátumy nie sú kolízne s existujúcou rezerváciou
+            cursor.execute("""
+                SELECT * FROM reservations
+                WHERE aid = %s
+                    AND NOT (%s > "To" OR %s < "From")
+            """, (aid, date_from, date_to))
+            conflict = cursor.fetchone()
+
+            if conflict:
+                return jsonify({'success': False, 'message': 'Accommodation is already reserved in this date range'}), 409
+
+            # Ak nie je konflikt, vytvor rezerváciu
+            cursor.execute("""
+                INSERT INTO reservations (aid, "From", "To", reserved_by)
+                VALUES (%s, %s, %s, %s)
+                RETURNING rid;
+            """, (aid, date_from, date_to, uid))
+            rid = cursor.fetchone()[0]
+            connection.commit()
+
+        return jsonify({'success': True, 'message': 'Reservation created', 'rid': rid}), 201
+
+    except Exception as e:
+        print("Make reservation error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+@app.route('/delete-reservation/<int:rid>', methods=['DELETE'])
+@token_required
+def delete_reservation(rid):
+    uid = request.user['uid']
+
+    try:
+        with connection.cursor() as cursor:
+            # Over, či rezerváciu vlastní prihlásený používateľ
+            cursor.execute("SELECT * FROM reservations WHERE rid = %s AND reserved_by = %s;", (rid, uid))
+            reservation = cursor.fetchone()
+
+            if not reservation:
+                return jsonify({'success': False, 'message': 'Reservation not found or unauthorized'}), 404
+
+            # Vymaž rezerváciu
+            cursor.execute("DELETE FROM reservations WHERE rid = %s;", (rid,))
+            connection.commit()
+
+        return jsonify({'success': True, 'message': f'Reservation {rid} deleted'}), 200
+
+    except Exception as e:
+        print("Delete reservation error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
