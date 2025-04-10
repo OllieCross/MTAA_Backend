@@ -4,3 +4,4 @@ PyJWT
 bcrypt
 psycopg2
 requests
+flasgger

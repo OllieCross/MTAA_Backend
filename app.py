@@ -5,6 +5,7 @@ import bcrypt
 from functools import wraps
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
+from flasgger import Swagger, swag_from
 import psycopg2
 import requests
 
@@ -14,6 +15,8 @@ app = Flask(__name__)
 SECRET_KEY = os.environ.get("SECRET_KEY")
 url = os.environ.get("DATABASE_URL")
 connection = psycopg2.connect(url)
+app.config['SWAGGER'] = {'title': 'Login API', 'uiversion': 3}
+swagger = Swagger(app)
 
 # overenia JWT tokenu
 def token_required(f):
@@ -40,6 +43,31 @@ def token_required(f):
 
 # Testovací endpoint
 @app.get("/default")
+@swag_from({
+    'tags': ['Test'],
+    'summary': 'Access test endpoint',
+    'description': 'Returns user info if a valid JWT token is provided.',
+    'security': [{
+        'BearerAuth': []
+    }],
+    'responses': {
+        200: {
+            'description': 'Access granted',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'message': 'Access granted',
+                        'user_id': 1,
+                        'role': 'owner'
+                    }
+                }
+            }
+        },
+        401: {
+            'description': 'Unauthorized - Missing or invalid token'
+        }
+    }
+})
 @token_required
 def default():
     user_data = request.user  # získané z tokenu
@@ -51,6 +79,44 @@ def default():
 
 # LOGIN s generovaním JWT tokenu
 @app.route('/login', methods=['POST'])
+@swag_from({
+    'tags': ['Authentication'],
+    'summary': 'Login a user',
+    'description': 'Authenticates user credentials and returns a JWT token on success.',
+    'requestBody': {
+        'required': True,
+        'content': {
+            'application/json': {
+                'example': {
+                    'email': 'user@example.com',
+                    'password': 'yourPassword123'
+                }
+            }
+        }
+    },
+    'responses': {
+        200: {
+            'description': 'Login successful',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'token': 'your.jwt.token.here'
+                    }
+                }
+            }
+        },
+        401: {
+            'description': 'Invalid password'
+        },
+        404: {
+            'description': 'User not found'
+        },
+        500: {
+            'description': 'Server error'
+        }
+    }
+})
 def login():
     data = request.json
     email = data.get('email')
@@ -85,6 +151,42 @@ def login():
         return jsonify({'success': False, 'message': 'Server error'}), 500
 
 @app.route('/delete-accommodation/<int:aid>', methods=['DELETE'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Delete accommodation',
+    'description': 'Deletes a user-owned accommodation by ID. Requires JWT in the Authorization header.',
+    'parameters': [
+        {
+            'name': 'aid',
+            'in': 'path',
+            'type': 'integer',
+            'required': True,
+            'description': 'ID of the accommodation to delete'
+        }
+    ],
+    'security': [{'BearerAuth': []}],
+    'responses': {
+        200: {
+            'description': 'Successfully deleted',
+            'content': {
+                'application/json': {
+                    'example': {'success': True, 'message': 'Accommodation 12 deleted'}
+                }
+            }
+        },
+        404: {
+            'description': 'Not found or unauthorized',
+            'content': {
+                'application/json': {
+                    'example': {'success': False, 'message': 'Accommodation not found or unauthorized'}
+                }
+            }
+        },
+        500: {
+            'description': 'Internal server error'
+        }
+    }
+})
 @token_required
 def delete_accommodation(aid):
     uid = request.user['uid']
@@ -112,6 +214,50 @@ def delete_accommodation(aid):
 
 # REGISTRÁCIA používateľa
 @app.route('/register', methods=['POST'])
+@swag_from({
+    'tags': ['Authentication'],
+    'summary': 'Register a new user',
+    'description': 'Creates a new user account with email, password, and role (default: guest).',
+    'requestBody': {
+        'required': True,
+        'content': {
+            'application/json': {
+                'example': {
+                    'email': 'newuser@example.com',
+                    'password': 'securePassword123',
+                    'role': 'guest'
+                }
+            }
+        }
+    },
+    'responses': {
+        201: {
+            'description': 'Registration successful',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'message': 'Registration successful'
+                    }
+                }
+            }
+        },
+        409: {
+            'description': 'User already exists',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'User already exists'
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error'
+        }
+    }
+})
 def register():
     data = request.json
     email = data.get('email')
@@ -164,7 +310,97 @@ def geocode_address_full(address):
         return lat, lon, city, country
     else:
         return None, None, "", ""
+
+# Pridanie ubytovania
 @app.route('/add-accommodation', methods=['POST'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Add a new accommodation',
+    'description': 'Adds a new accommodation with at least 3 images. Location data is auto-filled by geocoding the address. **Requires a valid JWT in the `Authorization` header.**',
+    'security': [{'BearerAuth': []}],
+    'requestBody': {
+        'required': True,
+        'content': {
+            'multipart/form-data': {
+                'schema': {
+                    'type': 'object',
+                    'properties': {
+                        'name': {
+                            'type': 'string',
+                            'description': 'Name/title of the accommodation'
+                        },
+                        'guests': {
+                            'type': 'string',
+                            'description': 'Max number of guests (stored as string/int)'
+                        },
+                        'price': {
+                            'type': 'string',
+                            'description': 'Price per night'
+                        },
+                        'address': {
+                            'type': 'string',
+                            'description': 'Address used for geocoding'
+                        },
+                        'description': {
+                            'type': 'string',
+                            'description': 'Text description'
+                        },
+                        'iban': {
+                            'type': 'string',
+                            'description': 'IBAN for payment'
+                        },
+                        'images': {
+                            'type': 'array',
+                            'description': 'At least 3 images are required',
+                            'items': {
+                                'type': 'string',
+                                'format': 'binary'
+                            }
+                        }
+                    },
+                    'required': ['name', 'guests', 'price', 'address', 'description', 'iban', 'images']
+                }
+            }
+        }
+    },
+    'responses': {
+        201: {
+            'description': 'Accommodation created successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'message': 'Accommodation added',
+                        'aid': 1
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Bad Request (missing field or insufficient images)',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Missing required fields'
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server Error',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Debug info...'
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def add_accommodation():
     try:
@@ -188,7 +424,7 @@ def add_accommodation():
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO accommodations
-                (name, location_city, location_country, owner, max_guests, latitude, longitude, pricepn, description, iban)
+                (name, location_city, location_country, owner_id, max_guests, latitude, longitude, price_per_night, description, iban)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING aid;
             """, (
@@ -210,6 +446,93 @@ def add_accommodation():
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/edit-accommodation/<int:aid>', methods=['PUT'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Edit existing accommodation',
+    'description': (
+        'Edits an existing accommodation by ID. The request must include at least 3 new images, '
+        'as old ones get deleted. Requires a valid JWT in the `Authorization` header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'parameters': [
+        {
+            'name': 'aid',
+            'in': 'path',
+            'required': True,
+            'type': 'integer',
+            'description': 'ID of the accommodation to edit'
+        }
+    ],
+    'requestBody': {
+        'required': True,
+        'content': {
+            'multipart/form-data': {
+                'schema': {
+                    'type': 'object',
+                    'properties': {
+                        'name': {'type': 'string'},
+                        'guests': {'type': 'string'},
+                        'price': {'type': 'string'},
+                        'address': {'type': 'string'},
+                        'description': {'type': 'string'},
+                        'iban': {'type': 'string'},
+                        'images': {
+                            'type': 'array',
+                            'description': 'At least 3 images required',
+                            'items': {
+                                'type': 'string',
+                                'format': 'binary'
+                            }
+                        }
+                    },
+                    'required': [
+                        'name', 'guests', 'price', 'address',
+                        'description', 'iban', 'images'
+                    ]
+                }
+            }
+        }
+    },
+    'responses': {
+        200: {
+            'description': 'Accommodation updated successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'message': 'Accommodation updated',
+                        'aid': 123
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Missing required fields or fewer than 3 images',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Missing required fields'
+                    }
+                }
+            }
+        },
+        404: {
+            'description': 'Accommodation not found or unauthorized',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Accommodation not found or unauthorized'
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error'
+        }
+    }
+})
 @token_required
 def edit_accommodation(aid):
     uid = request.user['uid']
@@ -244,7 +567,7 @@ def edit_accommodation(aid):
                     location_city = %s,
                     location_country = %s,
                     max_guests = %s,
-                    pricepn = %s,
+                    price_per_night = %s,
                     latitude = %s,
                     longitude = %s,
                     description = %s,
@@ -269,39 +592,118 @@ def edit_accommodation(aid):
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/like_dislike', methods=['POST'])
-@token_required
-def like_dislike_accommodation():
-    data = request.json
-    aid = data.get('aid')
-    uid = request.user['uid']
-
-    if not aid:
-        return jsonify({'success': False, 'message': 'Missing AID'}), 400
-
-    try:
-        with connection.cursor() as cursor:
-            # Over, či už existuje záznam
-            cursor.execute("SELECT * FROM liked WHERE uid = %s AND aid = %s", (uid, aid))
-            exists = cursor.fetchone()
-
-            if exists:
-                # Ak existuje, odstráň
-                cursor.execute("DELETE FROM liked WHERE uid = %s AND aid = %s", (uid, aid))
-                message = 'Unliked accommodation'
-            else:
-                # Inak pridaj
-                cursor.execute("INSERT INTO liked (uid, aid) VALUES (%s, %s)", (uid, aid))
-                message = 'Liked accommodation'
-
-            connection.commit()
-
-        return jsonify({'success': True, 'message': message, 'aid': aid}), 200
-
-    except Exception as e:
-        print("Like error:", e)
-        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+@swag_from({
+    'tags': ['Interactions'],
+    'summary': 'Toggle like/dislike for an accommodation',
+    'description': (
+        'Toggles the like status for an accommodation. If a record exists, '
+        'the accommodation is unliked; if not, it is liked. Requires a valid JWT in the Authorization header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'requestBody': {
+        'required': True,
+        'content': {
+            'application/json': {
+                'schema': {
+                    'type': 'object',
+                    'properties': {
+                        'aid': {
+                            'type': 'integer',
+                            'description': 'ID of the accommodation to like or dislike'
+                        }
+                    },
+                    'required': ['aid']
+                },
+                'example': {
+                    'aid': 12
+                }
+            }
+        }
+    },
+    'responses': {
+        200: {
+            'description': 'Operation successful',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'message': 'Liked accommodation',  # or "Unliked accommodation"
+                        'aid': 12
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Bad Request - Missing AID',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Missing AID'
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error during the like/dislike operation',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Detailed error message'
+                    }
+                }
+            }
+        }
+    }
+})
 
 @app.route('/liked-accommodations', methods=['GET'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Retrieve liked accommodations',
+    'description': (
+        'Returns a list of accommodations that the authenticated user has liked, '
+        'including details like accommodation ID, name, location (city and country), '
+        'price per night, rating, and a base64 encoded image.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'responses': {
+        200: {
+            'description': 'List of liked accommodations retrieved successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'liked_accommodations': [
+                            {
+                                'aid': 1,
+                                'name': 'Hotel ABC',
+                                'location': 'City, Country',
+                                'price_per_night': 100,
+                                'rating': 4.5,
+                                'image_base64': 'iVBORw0KGgoAAAANSUhEUgAABVYAAAG...'
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Detailed error message here...'
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def get_liked_accommodations():
     uid = request.user['uid']
@@ -314,7 +716,7 @@ def get_liked_accommodations():
                     a.name,
                     a.location_city,
                     a.location_country,
-                    a.pricepn,
+                    a.price_per_night,
                     r.rating,
                     (
                         SELECT encode(image, 'base64') 
@@ -355,6 +757,77 @@ def get_liked_accommodations():
 
 # PRE GPS POZIADAVKU
 @app.route('/get-address', methods=['POST'])
+@swag_from({
+    'tags': ['Geocoding'],
+    'summary': 'Retrieve address from GPS coordinates',
+    'description': (
+        'Performs reverse geocoding using OpenStreetMap Nominatim to convert GPS coordinates (latitude and longitude) '
+        'into a human-readable address. Returns the address in the response.'
+    ),
+    'requestBody': {
+        'required': True,
+        'content': {
+            'application/json': {
+                'schema': {
+                    'type': 'object',
+                    'properties': {
+                        'latitude': {
+                            'type': 'number',
+                            'example': 48.8566,
+                            'description': 'Latitude coordinate'
+                        },
+                        'longitude': {
+                            'type': 'number',
+                            'example': 2.3522,
+                            'description': 'Longitude coordinate'
+                        }
+                    },
+                    'required': ['latitude', 'longitude']
+                },
+                'example': {
+                    'latitude': 48.8566,
+                    'longitude': 2.3522
+                }
+            }
+        }
+    },
+    'responses': {
+        200: {
+            'description': 'Address retrieved successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'address': 'Paris, Île-de-France, France'
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Missing or invalid coordinates',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Missing coordinates'
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error during reverse geocoding',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Detailed error message'
+                    }
+                }
+            }
+        }
+    }
+})
 def get_address_from_coordinates():
     data = request.json
     lat = data.get('latitude')
@@ -385,6 +858,78 @@ def get_address_from_coordinates():
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/accommodation/<int:aid>', methods=['GET'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Retrieve accommodation details',
+    'description': (
+        'Returns detailed information of an accommodation specified by its ID. '
+        'The response includes the accommodation’s name, location (city and country), maximum guests, '
+        'coordinates, price per night, description, owner email, average rating, and a list of up to 3 images (Base64 encoded). '
+        'Requires a valid JWT provided in the Authorization header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'parameters': [
+        {
+            'name': 'aid',
+            'in': 'path',
+            'description': 'ID of the accommodation',
+            'required': True,
+            'type': 'integer'
+        }
+    ],
+    'responses': {
+        200: {
+            'description': 'Accommodation details retrieved successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'accommodation': {
+                            'aid': 1,
+                            'name': 'Hotel Paradise',
+                            'location': 'Paris, France',
+                            'max_guests': 4,
+                            'latitude': 48.8566,
+                            'longitude': 2.3522,
+                            'price_per_night': 150,
+                            'description': 'A wonderful place to stay',
+                            'owner_email': 'owner@example.com',
+                            'average_rating': 4.5,
+                            'images_base64': [
+                                "base64string1",
+                                "base64string2",
+                                "base64string3"
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        404: {
+            'description': 'Accommodation not found',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Accommodation not found'
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Detailed error message'
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def get_accommodation_details(aid):
     try:
@@ -398,7 +943,7 @@ def get_accommodation_details(aid):
                     a.max_guests,
                     a.latitude,
                     a.longitude,
-                    a.pricepn,
+                    a.price_per_night,
                     a.description,
                     u.email AS owner_email,
                     ROUND(AVG(r.rating), 2) AS avg_rating
@@ -447,6 +992,56 @@ def get_accommodation_details(aid):
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/accommodation-gallery/<int:aid>', methods=['GET'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Retrieve accommodation gallery',
+    'description': (
+        'Returns a list of Base64-encoded images from the accommodation gallery specified by its ID. '
+        'Requires a valid JWT provided in the Authorization header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'parameters': [
+        {
+            'name': 'aid',
+            'in': 'path',
+            'required': True,
+            'schema': {
+                'type': 'integer'
+            },
+            'description': 'ID of the accommodation whose image gallery is to be fetched'
+        }
+    ],
+    'responses': {
+        200: {
+            'description': 'Accommodation gallery retrieved successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'aid': 1,
+                        'images_base64': [
+                            'base64ImageString1',
+                            'base64ImageString2',
+                            'base64ImageString3'
+                        ]
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Error details'
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def get_accommodation_gallery(aid):
     try:
@@ -470,6 +1065,96 @@ def get_accommodation_gallery(aid):
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/make-reservation', methods=['POST'])
+@swag_from({
+    'tags': ['Reservations'],
+    'summary': 'Make a new reservation',
+    'description': (
+        'Creates a reservation for an accommodation if the requested date range is available. '
+        'The JSON payload must include the accommodation ID (aid), a start date ("from"), and an end date ("to"). '
+        'Requires a valid JWT provided in the Authorization header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'requestBody': {
+        'required': True,
+        'content': {
+            'application/json': {
+                'schema': {
+                    'type': 'object',
+                    'properties': {
+                        'aid': {
+                            'type': 'integer',
+                            'description': 'ID of the accommodation to reserve'
+                        },
+                        'from': {
+                            'type': 'string',
+                            'format': 'date',
+                            'description': 'Reservation start date (format: YYYY-MM-DD)'
+                        },
+                        'to': {
+                            'type': 'string',
+                            'format': 'date',
+                            'description': 'Reservation end date (format: YYYY-MM-DD)'
+                        }
+                    },
+                    'required': ['aid', 'from', 'to']
+                },
+                'example': {
+                    'aid': 5,
+                    'from': '2025-05-01',
+                    'to': '2025-05-10'
+                }
+            }
+        }
+    },
+    'responses': {
+        201: {
+            'description': 'Reservation created successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'message': 'Reservation created',
+                        'rid': 123
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Missing required fields',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Missing required fields'
+                    }
+                }
+            }
+        },
+        409: {
+            'description': 'Accommodation already reserved in the given date range',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Accommodation is already reserved in this date range'
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Detailed error message'
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def make_reservation():
     data = request.json
@@ -510,6 +1195,62 @@ def make_reservation():
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/delete-reservation/<int:rid>', methods=['DELETE'])
+@swag_from({
+    'tags': ['Reservations'],
+    'summary': 'Delete a reservation',
+    'description': (
+        'Deletes a reservation specified by its reservation ID (rid) if it belongs to the authenticated user. '
+        'Requires a valid JWT provided in the Authorization header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'parameters': [
+        {
+            'name': 'rid',
+            'in': 'path',
+            'required': True,
+            'schema': {
+                'type': 'integer'
+            },
+            'description': 'ID of the reservation to delete'
+        }
+    ],
+    'responses': {
+        200: {
+            'description': 'Reservation deleted successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'message': 'Reservation 123 deleted'
+                    }
+                }
+            }
+        },
+        404: {
+            'description': 'Reservation not found or unauthorized',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Reservation not found or unauthorized'
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error encountered while deleting the reservation',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Detailed error message'
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def delete_reservation(rid):
     uid = request.user['uid']
@@ -534,6 +1275,49 @@ def delete_reservation(rid):
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/my-accommodations', methods=['GET'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Retrieve user-owned accommodations',
+    'description': (
+        'Retrieves a list of accommodations that belong to the authenticated user. '
+        'Each accommodation returned includes its ID, name, city, country, and one image in Base64 format. '
+        'This endpoint requires a valid JWT provided in the Authorization header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'responses': {
+        200: {
+            'description': 'Accommodations retrieved successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'accommodations': [
+                            {
+                                'aid': 1,
+                                'name': 'Hotel Sunshine',
+                                'city': 'Miami',
+                                'country': 'USA',
+                                'image_base64': 'base64EncodedString...'
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error while retrieving accommodations',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Detailed error message'
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def get_my_accommodations():
     uid = request.user['uid']
@@ -576,6 +1360,54 @@ def get_my_accommodations():
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/my-reservations', methods=['GET'])
+@swag_from({
+    'tags': ['Reservations'],
+    'summary': 'Retrieve user reservations',
+    'description': (
+        'Returns a list of reservations made by the authenticated user. Each reservation includes '
+        'its reservation ID (rid), the associated accommodation ID (aid), and the location (city and country) of the accommodation. '
+        'This endpoint requires a valid JWT provided in the Authorization header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'responses': {
+        200: {
+            'description': 'Reservations retrieved successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'reservations': [
+                            {
+                                'rid': 101,
+                                'aid': 5,
+                                'city': 'Paris',
+                                'country': 'France'
+                            },
+                            {
+                                'rid': 102,
+                                'aid': 8,
+                                'city': 'Berlin',
+                                'country': 'Germany'
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error while retrieving reservations',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Detailed error message'
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def get_my_reservations():
     uid = request.user['uid']
@@ -610,6 +1442,93 @@ def get_my_reservations():
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/search-accommodations', methods=['POST'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Search accommodations',
+    'description': (
+        'Search for accommodations based on optional filters: location, date range, and number of guests. '
+        'If a location is provided, it is geocoded to latitude and longitude and accommodations within a 50 km radius are returned. '
+        'Additionally, if a date range is provided, accommodations with conflicting reservations are excluded. '
+        'A valid JWT is required in the Authorization header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'requestBody': {
+        'required': True,
+        'content': {
+            'application/json': {
+                'schema': {
+                    'type': 'object',
+                    'properties': {
+                        'location': {
+                            'type': 'string',
+                            'description': 'Location to search for (e.g., "Zagreb")'
+                        },
+                        'from': {
+                            'type': 'string',
+                            'format': 'date',
+                            'description': 'Start date for availability (format: YYYY-MM-DD)'
+                        },
+                        'to': {
+                            'type': 'string',
+                            'format': 'date',
+                            'description': 'End date for availability (format: YYYY-MM-DD)'
+                        },
+                        'guests': {
+                            'type': 'integer',
+                            'description': 'Minimum number of guests the accommodation must support'
+                        }
+                    },
+                    'example': {
+                        "location": "Zagreb",
+                        "from": "2025-06-01",
+                        "to": "2025-06-10",
+                        "guests": 2
+                    }
+                }
+            }
+        }
+    },
+    'responses': {
+        200: {
+            'description': 'Search results with matching accommodations',
+            'content': {
+                'application/json': {
+                    'example': {
+                        "success": True,
+                        "results": [
+                            {
+                                "aid": 1,
+                                "name": "Cozy Apartment",
+                                "price_per_night": 80,
+                                "location": "Zagreb, Croatia",
+                                "image_base64": "base64EncodedImageString..."
+                            },
+                            {
+                                "aid": 2,
+                                "name": "Modern Studio",
+                                "price_per_night": 120,
+                                "location": "Zagreb, Croatia",
+                                "image_base64": "base64EncodedImageString..."
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error during search',
+            'content': {
+                'application/json': {
+                    'example': {
+                        "success": False,
+                        "message": "Server error",
+                        "error": "Detailed error message here..."
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def search_accommodations():
     data = request.json
@@ -629,7 +1548,7 @@ def search_accommodations():
                 SELECT
                     a.aid,
                     a.name,
-                    a.pricepn,
+                    a.price_per_night,
                     a.location_city,
                     a.location_country,
                     a.latitude,
@@ -700,12 +1619,69 @@ def search_accommodations():
         }), 500
 
 @app.route('/accommodation-confirmation/<int:aid>', methods=['GET'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Confirm accommodation details',
+    'description': (
+        'Retrieves the confirmation details of an accommodation, including the nightly price and the IBAN, '
+        'using the provided accommodation ID (aid). Requires a valid JWT provided in the Authorization header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'parameters': [
+        {
+            'name': 'aid',
+            'in': 'path',
+            'required': True,
+            'schema': {
+                'type': 'integer'
+            },
+            'description': 'The ID of the accommodation to confirm'
+        }
+    ],
+    'responses': {
+        200: {
+            'description': 'Accommodation confirmation details retrieved successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': True,
+                        'price': 150,
+                        'iban': 'HRkk 1234 5678 9012 3456 7890'
+                    }
+                }
+            }
+        },
+        404: {
+            'description': 'Accommodation not found',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Accommodation not found'
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Detailed error message'
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def accommodation_confirmation(aid):
     try:
         with connection.cursor() as cursor:
             cursor.execute("""
-                SELECT pricepn, iban FROM accommodations WHERE aid = %s;
+                SELECT price_per_night, iban FROM accommodations WHERE aid = %s;
             """, (aid,))
             accommodation = cursor.fetchone()
 
@@ -720,6 +1696,56 @@ def accommodation_confirmation(aid):
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/main-screen-accommodations', methods=['GET'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Retrieve main screen accommodations',
+    'description': (
+        'Returns a random selection of 5 accommodations to be displayed on the main screen. '
+        'Each accommodation includes its ID, name, price per night, a location string (city and country), '
+        'and one Base64-encoded image. Requires a valid JWT in the Authorization header.'
+    ),
+    'security': [{'BearerAuth': []}],
+    'responses': {
+        200: {
+            'description': 'Main screen accommodations retrieved successfully',
+            'content': {
+                'application/json': {
+                    'example': {
+                        "success": True,
+                        "results": [
+                            {
+                                "aid": 1,
+                                "name": "Cozy Apartment",
+                                "price_per_night": 80,
+                                "location": "Zagreb, Croatia",
+                                "image_base64": "base64EncodedImageString..."
+                            },
+                            {
+                                "aid": 2,
+                                "name": "Modern Studio",
+                                "price_per_night": 120,
+                                "location": "Zagreb, Croatia",
+                                "image_base64": "base64EncodedImageString..."
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error while retrieving accommodations',
+            'content': {
+                'application/json': {
+                    'example': {
+                        "success": False,
+                        "message": "Server error",
+                        "error": "Detailed error message"
+                    }
+                }
+            }
+        }
+    }
+})
 @token_required
 def main_screen_accommodations():
     try:
@@ -728,7 +1754,7 @@ def main_screen_accommodations():
                 SELECT
                     a.aid,
                     a.name,
-                    a.pricepn,
+                    a.price_per_night,
                     a.location_city,
                     a.location_country,
                     (
