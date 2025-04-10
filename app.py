@@ -592,6 +592,37 @@ def edit_accommodation(aid):
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/like_dislike', methods=['POST'])
+@token_required
+def like_dislike_accommodation():
+    data = request.json
+    aid = data.get('aid')
+    uid = request.user['uid']
+
+    if not aid:
+        return jsonify({'success': False, 'message': 'Missing AID'}), 400
+
+    try:
+        with connection.cursor() as cursor:
+            # Over, či už existuje záznam
+            cursor.execute("SELECT * FROM liked WHERE uid = %s AND aid = %s", (uid, aid))
+            exists = cursor.fetchone()
+
+            if exists:
+                # Ak existuje, odstráň
+                cursor.execute("DELETE FROM liked WHERE uid = %s AND aid = %s", (uid, aid))
+                message = 'Unliked accommodation'
+            else:
+                # Inak pridaj
+                cursor.execute("INSERT INTO liked (uid, aid) VALUES (%s, %s)", (uid, aid))
+                message = 'Liked accommodation'
+
+            connection.commit()
+
+        return jsonify({'success': True, 'message': message, 'aid': aid}), 200
+
+    except Exception as e:
+        print("Like error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 @swag_from({
     'tags': ['Interactions'],
     'summary': 'Toggle like/dislike for an accommodation',
