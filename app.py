@@ -4,7 +4,7 @@ import datetime
 import bcrypt
 from functools import wraps
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, abort, Response
 from flasgger import Swagger, swag_from
 import psycopg2
 import requests
@@ -194,7 +194,7 @@ def delete_accommodation(aid):
     try:
         with connection.cursor() as cursor:
             # Skontroluj, či používateľ je vlastníkom ubytovania
-            cursor.execute("SELECT * FROM accommodations WHERE aid = %s AND owner = %s;", (aid, uid))
+            cursor.execute("SELECT * FROM accommodations WHERE aid = %s AND owner_id = %s;", (aid, uid))
             acc = cursor.fetchone()
 
             if not acc:
@@ -555,7 +555,7 @@ def edit_accommodation(aid):
             return jsonify({'success': False, 'message': 'At least 3 images are required'}), 400
 
         with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM accommodations WHERE aid = %s AND owner = %s;", (aid, uid))
+            cursor.execute("SELECT * FROM accommodations WHERE aid = %s AND owner_id = %s;", (aid, uid))
             accommodation = cursor.fetchone()
 
             if not accommodation:
@@ -697,7 +697,7 @@ def like_dislike_accommodation():
     'description': (
         'Returns a list of accommodations that the authenticated user has liked, '
         'including details like accommodation ID, name, location (city and country), '
-        'price per night, rating, and a base64 encoded image.'
+        'price per night and rating.'
     ),
     'security': [{'BearerAuth': []}],
     'responses': {
@@ -713,8 +713,7 @@ def like_dislike_accommodation():
                                 'name': 'Hotel ABC',
                                 'location': 'City, Country',
                                 'price_per_night': 100,
-                                'rating': 4.5,
-                                'image_base64': 'iVBORw0KGgoAAAANSUhEUgAABVYAAAG...'
+                                'rating': 4.5
                             }
                         ]
                     }
@@ -738,7 +737,6 @@ def like_dislike_accommodation():
 @token_required
 def get_liked_accommodations():
     uid = request.user['uid']
-
     try:
         with connection.cursor() as cursor:
             cursor.execute("""
@@ -748,14 +746,7 @@ def get_liked_accommodations():
                     a.location_city,
                     a.location_country,
                     a.price_per_night,
-                    r.rating,
-                    (
-                        SELECT encode(image, 'base64') 
-                        FROM pictures 
-                        WHERE aid = a.aid 
-                        ORDER BY pid ASC 
-                        LIMIT 1
-                    ) AS image_base64
+                    r.rating
                 FROM liked l
                 JOIN accommodations a ON a.aid = l.aid
                 LEFT JOIN (
@@ -770,14 +761,13 @@ def get_liked_accommodations():
 
         accommodations = []
         for row in results:
-            aid, name, city, country, price, rating, image_base64 = row
+            aid, name, city, country, price, rating = row
             accommodations.append({
                 'aid': aid,
                 'name': name,
                 'location': f"{city}, {country}",
                 'price_per_night': price,
                 'rating': rating if rating else 0.0,
-                'image_base64': image_base64
             })
 
         return jsonify({'success': True, 'liked_accommodations': accommodations}), 200
@@ -895,7 +885,7 @@ def get_address_from_coordinates():
     'description': (
         'Returns detailed information of an accommodation specified by its ID. '
         'The response includes the accommodation’s name, location (city and country), maximum guests, '
-        'coordinates, price per night, description, owner email, average rating, and a list of up to 3 images (Base64 encoded). '
+        'coordinates, price per night, description, owner email and average rating. '
         'Requires a valid JWT provided in the Authorization header.'
     ),
     'security': [{'BearerAuth': []}],
@@ -925,12 +915,7 @@ def get_address_from_coordinates():
                             'price_per_night': 150,
                             'description': 'A wonderful place to stay',
                             'owner_email': 'owner@example.com',
-                            'average_rating': 4.5,
-                            'images_base64': [
-                                "base64string1",
-                                "base64string2",
-                                "base64string3"
-                            ]
+                            'average_rating': 4.5
                         }
                     }
                 }
@@ -976,10 +961,10 @@ def get_accommodation_details(aid):
                     a.longitude,
                     a.price_per_night,
                     a.description,
-                    u.email AS owner_email,
+                    u.email AS owner_email
                     ROUND(AVG(r.rating), 2) AS avg_rating
                 FROM accommodations a
-                JOIN users u ON u.uid = a.owner
+                JOIN users u ON u.uid = a.owner_id
                 LEFT JOIN reviews r ON a.aid = r.aid
                 WHERE a.aid = %s
                 GROUP BY a.aid, u.email;
@@ -990,16 +975,6 @@ def get_accommodation_details(aid):
                 return jsonify({'success': False, 'message': 'Accommodation not found'}), 404
 
             (name, city, country, guests, lat, lon, price, desc, owner_email, avg_rating) = result
-
-            # Získaj 3 obrázky
-            cursor.execute("""
-                SELECT encode(image, 'base64') 
-                FROM pictures 
-                WHERE aid = %s 
-                ORDER BY pid 
-                LIMIT 3;
-            """, (aid,))
-            images = [row[0] for row in cursor.fetchall()]
 
         return jsonify({
             'success': True,
@@ -1014,85 +989,11 @@ def get_accommodation_details(aid):
                 'description': desc,
                 'owner_email': owner_email,
                 'average_rating': avg_rating if avg_rating is not None else 0.0,
-                'images_base64': images
             }
         }), 200
 
     except Exception as e:
         print("Get accommodation detail error:", e)
-        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
-
-@app.route('/accommodation-gallery/<int:aid>', methods=['GET'])
-@swag_from({
-    'tags': ['Accommodations'],
-    'summary': 'Retrieve accommodation gallery',
-    'description': (
-        'Returns a list of Base64-encoded images from the accommodation gallery specified by its ID. '
-        'Requires a valid JWT provided in the Authorization header.'
-    ),
-    'security': [{'BearerAuth': []}],
-    'parameters': [
-        {
-            'name': 'aid',
-            'in': 'path',
-            'required': True,
-            'schema': {
-                'type': 'integer'
-            },
-            'description': 'ID of the accommodation whose image gallery is to be fetched'
-        }
-    ],
-    'responses': {
-        200: {
-            'description': 'Accommodation gallery retrieved successfully',
-            'content': {
-                'application/json': {
-                    'example': {
-                        'success': True,
-                        'aid': 1,
-                        'images_base64': [
-                            'base64ImageString1',
-                            'base64ImageString2',
-                            'base64ImageString3'
-                        ]
-                    }
-                }
-            }
-        },
-        500: {
-            'description': 'Server error',
-            'content': {
-                'application/json': {
-                    'example': {
-                        'success': False,
-                        'message': 'Server error',
-                        'error': 'Error details'
-                    }
-                }
-            }
-        }
-    }
-})
-@token_required
-def get_accommodation_gallery(aid):
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT encode(image, 'base64')
-                FROM pictures
-                WHERE aid = %s
-                ORDER BY pid;
-            """, (aid,))
-            images = [row[0] for row in cursor.fetchall()]
-
-        return jsonify({
-            'success': True,
-            'aid': aid,
-            'images_base64': images
-        }), 200
-
-    except Exception as e:
-        print("Get accommodation gallery error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 @app.route('/make-reservation', methods=['POST'])
@@ -1311,7 +1212,7 @@ def delete_reservation(rid):
     'summary': 'Retrieve user-owned accommodations',
     'description': (
         'Retrieves a list of accommodations that belong to the authenticated user. '
-        'Each accommodation returned includes its ID, name, city, country, and one image in Base64 format. '
+        'Each accommodation returned includes its ID, name, city and country. '
         'This endpoint requires a valid JWT provided in the Authorization header.'
     ),
     'security': [{'BearerAuth': []}],
@@ -1328,7 +1229,6 @@ def delete_reservation(rid):
                                 'name': 'Hotel Sunshine',
                                 'city': 'Miami',
                                 'country': 'USA',
-                                'image_base64': 'base64EncodedString...'
                             }
                         ]
                     }
@@ -1360,28 +1260,20 @@ def get_my_accommodations():
                     a.aid,
                     a.name,
                     a.location_city,
-                    a.location_country,
-                    (
-                        SELECT encode(image, 'base64') 
-                        FROM pictures 
-                        WHERE aid = a.aid 
-                        ORDER BY pid ASC 
-                        LIMIT 1
-                    ) AS image_base64
+                    a.location_country
                 FROM accommodations a
-                WHERE a.owner = %s;
+                WHERE a.owner_id = %s;
             """, (uid,))
             results = cursor.fetchall()
 
         accommodations = []
         for row in results:
-            aid, name, city, country, image_base64 = row
+            aid, name, city, country = row
             accommodations.append({
                 'aid': aid,
                 'name': name,
                 'city': city,
                 'country': country,
-                'image_base64': image_base64
             })
 
         return jsonify({'success': True, 'accommodations': accommodations}), 200
@@ -1531,15 +1423,13 @@ def get_my_reservations():
                                 "aid": 1,
                                 "name": "Cozy Apartment",
                                 "price_per_night": 80,
-                                "location": "Zagreb, Croatia",
-                                "image_base64": "base64EncodedImageString..."
+                                "location": "Zagreb, Croatia"
                             },
                             {
                                 "aid": 2,
                                 "name": "Modern Studio",
                                 "price_per_night": 120,
-                                "location": "Zagreb, Croatia",
-                                "image_base64": "base64EncodedImageString..."
+                                "location": "Zagreb, Croatia"
                             }
                         ]
                     }
@@ -1583,14 +1473,7 @@ def search_accommodations():
                     a.location_city,
                     a.location_country,
                     a.latitude,
-                    a.longitude,
-                    (
-                        SELECT encode(image, 'base64')
-                        FROM pictures
-                        WHERE aid = a.aid
-                        ORDER BY pid ASC
-                        LIMIT 1
-                    ) AS image_base64
+                    a.longitude
                 FROM accommodations a
                 WHERE TRUE
             """
@@ -1634,8 +1517,7 @@ def search_accommodations():
                     "aid": aid,
                     "name": name,
                     "price_per_night": price,
-                    "location": f"{city}, {country}",
-                    "image_base64": image
+                    "location": f"{city}, {country}"
                 })
 
         return jsonify({"success": True, "results": result}), 200
@@ -1732,8 +1614,7 @@ def accommodation_confirmation(aid):
     'summary': 'Retrieve main screen accommodations',
     'description': (
         'Returns a random selection of 5 accommodations to be displayed on the main screen. '
-        'Each accommodation includes its ID, name, price per night, a location string (city and country), '
-        'and one Base64-encoded image. Requires a valid JWT in the Authorization header.'
+        'Each accommodation includes its ID, name, price per night, a location string (city and country). Requires a valid JWT in the Authorization header.'
     ),
     'security': [{'BearerAuth': []}],
     'responses': {
@@ -1748,15 +1629,13 @@ def accommodation_confirmation(aid):
                                 "aid": 1,
                                 "name": "Cozy Apartment",
                                 "price_per_night": 80,
-                                "location": "Zagreb, Croatia",
-                                "image_base64": "base64EncodedImageString..."
+                                "location": "Zagreb, Croatia"
                             },
                             {
                                 "aid": 2,
                                 "name": "Modern Studio",
                                 "price_per_night": 120,
-                                "location": "Zagreb, Croatia",
-                                "image_base64": "base64EncodedImageString..."
+                                "location": "Zagreb, Croatia"
                             }
                         ]
                     }
@@ -1787,14 +1666,7 @@ def main_screen_accommodations():
                     a.name,
                     a.price_per_night,
                     a.location_city,
-                    a.location_country,
-                    (
-                        SELECT encode(image, 'base64')
-                        FROM pictures
-                        WHERE aid = a.aid
-                        ORDER BY pid ASC
-                        LIMIT 1
-                    ) AS image_base64
+                    a.location_country
                 FROM accommodations a
                 ORDER BY RANDOM()
                 LIMIT 5;
@@ -1808,9 +1680,8 @@ def main_screen_accommodations():
                     "name": name,
                     "price_per_night": price,
                     "location": f"{city}, {country}",
-                    "image_base64": image
                 }
-                for aid, name, price, city, country, image in accommodations
+                for aid, name, price, city, country in accommodations
             ]
 
         return jsonify({"success": True, "results": result}), 200
@@ -1824,6 +1695,113 @@ def main_screen_accommodations():
             "error": str(e)
         }), 500
 
+@app.route('/accommodations/<int:aid>/image/<int:image_index>', methods=['GET'])
+@swag_from({
+    'tags': ['Accommodations'],
+    'summary': 'Retrieve a specific accommodation image',
+    'description': (
+        'Fetches a specific image for the given accommodation (aid) as a binary stream. '
+        'The image_index parameter represents poradové číslo obrázka (začínajúc od 1). '
+        'Odpoveď obsahuje HTTP hlavičku Content-Type nastavenú na "image/jpeg".'
+    ),
+    'parameters': [
+        {
+            'name': 'aid',
+            'in': 'path',
+            'description': 'Unique identifier of the accommodation',
+            'required': True,
+            'type': 'integer'
+        },
+        {
+            'name': 'image_index',
+            'in': 'path',
+            'description': 'Index of the image to fetch (starting at 1)',
+            'required': True,
+            'type': 'integer'
+        }
+    ],
+    'responses': {
+        200: {
+            'description': 'Image stream returned successfully',
+            'content': {
+                'image/jpeg': {
+                    'schema': {
+                        'type': 'string',
+                        'format': 'binary'
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Invalid parameter: image_index must be 1 or greater',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Zlý Parameter image_index'
+                    }
+                }
+            }
+        },
+        404: {
+            'description': 'Image not found for the given accommodation',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Obrázok nebol nájdený'
+                    }
+                }
+            }
+        },
+        500: {
+            'description': 'Server error',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'success': False,
+                        'message': 'Server error',
+                        'error': 'Detailed error message'
+                    }
+                }
+            }
+        }
+    },
+    'security': [
+        {
+            'BearerAuth': []
+        }
+    ]
+})
+@token_required  # Ak je potrebná autentifikácia aj pre prístup k obrázkom
+def get_accommodation_image(aid, image_index):
+    # Overenie, že index obrázku je platný (1, 2, 3, ...)
+    if image_index < 1:
+        abort(400, description="Zlý Parameter image_index")
+
+    try:
+        with connection.cursor() as cursor:
+            # Vypočítame offset pre SQL dotaz (prvý obrázok má offset 0)
+            offset = image_index - 1
+            cursor.execute("""
+                SELECT image
+                FROM pictures 
+                WHERE aid = %s 
+                ORDER BY pid ASC 
+                LIMIT 1 OFFSET %s;
+            """, (aid, offset))
+            result = cursor.fetchone()
+
+        if result:
+            image, = result  # Rozbalenie tuple
+            default_mimetype = 'image/jpeg'  # Použite štandardný MIME typ pre JPEG obrázky
+            return Response(image, mimetype=default_mimetype)
+        else:
+            abort(404, description="Obrázok nebol nájdený")
+    except Exception as e:
+        print("Get accommodation image error:", e)
+        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
 # Spustenie servera
 if __name__ == '__main__':
-    app.run(debug=False)
+    app.run(debug=False,port=5001)
