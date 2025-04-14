@@ -767,7 +767,7 @@ def get_liked_accommodations():
                 'name': name,
                 'location': f"{city}, {country}",
                 'price_per_night': price,
-                'rating': rating if rating else 0.0,
+                'rating': rating if rating else 0.0
             })
 
         return jsonify({'success': True, 'liked_accommodations': accommodations}), 200
@@ -988,7 +988,7 @@ def get_accommodation_details(aid):
                 'price_per_night': price,
                 'description': desc,
                 'owner_email': owner_email,
-                'average_rating': avg_rating if avg_rating is not None else 0.0,
+                'average_rating': avg_rating if avg_rating is not None else 0.0
             }
         }), 200
 
@@ -1228,7 +1228,7 @@ def delete_reservation(rid):
                                 'aid': 1,
                                 'name': 'Hotel Sunshine',
                                 'city': 'Miami',
-                                'country': 'USA',
+                                'country': 'USA'
                             }
                         ]
                     }
@@ -1273,7 +1273,7 @@ def get_my_accommodations():
                 'aid': aid,
                 'name': name,
                 'city': city,
-                'country': country,
+                'country': country
             })
 
         return jsonify({'success': True, 'accommodations': accommodations}), 200
@@ -1679,7 +1679,7 @@ def main_screen_accommodations():
                     "aid": aid,
                     "name": name,
                     "price_per_night": price,
-                    "location": f"{city}, {country}",
+                    "location": f"{city}, {country}"
                 }
                 for aid, name, price, city, country in accommodations
             ]
@@ -1804,4 +1804,4 @@ def get_accommodation_image(aid, image_index):
 
 # Spustenie servera
 if __name__ == '__main__':
-    app.run(debug=False,port=5001)
+    app.run(debug=False, port=5001)
