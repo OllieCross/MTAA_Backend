@@ -9,6 +9,7 @@ from flasgger import Swagger, swag_from
 import psycopg2
 import requests
 
+
 # Načítanie credentials z .env súboru
 load_dotenv()
 app = Flask(__name__)
@@ -17,6 +18,10 @@ url = os.environ.get("DATABASE_URL")
 connection = psycopg2.connect(url)
 app.config['SWAGGER'] = {'title': 'Login API', 'uiversion': 3}
 swagger = Swagger(app)
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)
 
 # overenia JWT tokenu
 def token_required(f):
@@ -697,7 +702,7 @@ def like_dislike_accommodation():
     'description': (
         'Returns a list of accommodations that the authenticated user has liked, '
         'including details like accommodation ID, name, location (city and country), '
-        'price per night and rating.'
+        'price per night.'
     ),
     'security': [{'BearerAuth': []}],
     'responses': {
@@ -713,7 +718,6 @@ def like_dislike_accommodation():
                                 'name': 'Hotel ABC',
                                 'location': 'City, Country',
                                 'price_per_night': 100,
-                                'rating': 4.5
                             }
                         ]
                     }
@@ -745,15 +749,9 @@ def get_liked_accommodations():
                     a.name,
                     a.location_city,
                     a.location_country,
-                    a.price_per_night,
-                    r.rating
+                    a.price_per_night
                 FROM liked l
                 JOIN accommodations a ON a.aid = l.aid
-                LEFT JOIN (
-                    SELECT aid, ROUND(AVG(rating), 2) AS rating 
-                    FROM reviews 
-                    GROUP BY aid
-                ) r ON a.aid = r.aid
                 WHERE l.uid = %s
                 LIMIT 20;
             """, (uid,))
@@ -761,13 +759,12 @@ def get_liked_accommodations():
 
         accommodations = []
         for row in results:
-            aid, name, city, country, price, rating = row
+            aid, name, city, country, price = row
             accommodations.append({
                 'aid': aid,
                 'name': name,
                 'location': f"{city}, {country}",
                 'price_per_night': price,
-                'rating': rating if rating else 0.0
             })
 
         return jsonify({'success': True, 'liked_accommodations': accommodations}), 200
@@ -885,7 +882,7 @@ def get_address_from_coordinates():
     'description': (
         'Returns detailed information of an accommodation specified by its ID. '
         'The response includes the accommodation’s name, location (city and country), maximum guests, '
-        'coordinates, price per night, description, owner email and average rating. '
+        'coordinates, price per night, description, owner email. '
         'Requires a valid JWT provided in the Authorization header.'
     ),
     'security': [{'BearerAuth': []}],
@@ -915,7 +912,6 @@ def get_address_from_coordinates():
                             'price_per_night': 150,
                             'description': 'A wonderful place to stay',
                             'owner_email': 'owner@example.com',
-                            'average_rating': 4.5
                         }
                     }
                 }
@@ -962,10 +958,8 @@ def get_accommodation_details(aid):
                     a.price_per_night,
                     a.description,
                     u.email AS owner_email
-                    ROUND(AVG(r.rating), 2) AS avg_rating
                 FROM accommodations a
                 JOIN users u ON u.uid = a.owner_id
-                LEFT JOIN reviews r ON a.aid = r.aid
                 WHERE a.aid = %s
                 GROUP BY a.aid, u.email;
             """, (aid,))
@@ -974,23 +968,23 @@ def get_accommodation_details(aid):
             if not result:
                 return jsonify({'success': False, 'message': 'Accommodation not found'}), 404
 
-            (name, city, country, guests, lat, lon, price, desc, owner_email, avg_rating) = result
+            (name, city, country, guests, lat, lon, price, desc, owner_email) = result
 
-        return jsonify({
-            'success': True,
-            'accommodation': {
-                'aid': aid,
-                'name': name,
-                'location': f"{city}, {country}",
-                'max_guests': guests,
-                'latitude': lat,
-                'longitude': lon,
-                'price_per_night': price,
-                'description': desc,
-                'owner_email': owner_email,
-                'average_rating': avg_rating if avg_rating is not None else 0.0
-            }
-        }), 200
+            return jsonify({
+                'success': True,
+                'accommodation': {
+                    'aid': aid,
+                    'name': name,
+                    'location': f"{city}, {country}",
+                    'max_guests': guests,
+                    'latitude': lat,
+                    'longitude': lon,
+                    'price_per_night': price,
+                    'description': desc,
+                    'owner_email': owner_email
+                }
+            }), 200
+
 
     except Exception as e:
         print("Get accommodation detail error:", e)
@@ -1501,7 +1495,7 @@ def search_accommodations():
             accommodations = cursor.fetchall()
 
             result = []
-            for aid, name, price, city, country, lat, lon, image in accommodations:
+            for aid, name, price, city, country, lat, lon in accommodations:
                 # Over dostupnosť podľa dátumov
                 if date_from and date_to:
                     cursor.execute("""
