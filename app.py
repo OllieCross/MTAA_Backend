@@ -18,10 +18,8 @@ url = os.environ.get("DATABASE_URL")
 connection = psycopg2.connect(url)
 app.config['SWAGGER'] = {'title': 'Login API', 'uiversion': 3}
 swagger = Swagger(app)
-from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
 
 # overenia JWT tokenu
 def token_required(f):
