@@ -5,3 +5,6 @@ bcrypt
 psycopg2
 requests
 flasgger
+flask-socketio
+eventlet
+redis

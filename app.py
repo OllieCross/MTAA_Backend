@@ -8,19 +8,40 @@ from flask import Flask, request, jsonify, abort, Response
 from flasgger import Swagger, swag_from
 import psycopg2
 import requests
+import eventlet; eventlet.monkey_patch()
+from flask_socketio import SocketIO, join_room, emit
 #from flask_cors import CORS #zakomentovat pre olivera
 
 # Načítanie credentials z .env súboru
 load_dotenv()
 app = Flask(__name__)
+socketio = SocketIO(                                    # replaces plain app.run later
+    app,
+    cors_allowed_origins="*",
+    message_queue="redis://",   # comment this line if you don’t have Redis yet
+)
 SECRET_KEY = os.environ.get("SECRET_KEY")
 url = os.environ.get("DATABASE_URL")
 connection = psycopg2.connect(url)
 app.config['SWAGGER'] = {'title': 'Login API', 'uiversion': 3}
 swagger = Swagger(app)
 
-app = Flask(__name__)
 #CORS(app) #zakomentovat pre olivera
+
+@socketio.on("connect")
+def socket_connect():
+    token = request.args.get("token")          # Flutter client will send ?token=<JWT>
+    if not token:
+        return False                           # cancel the handshake → 401 on client
+
+    try:
+        data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        uid  = data["uid"]
+    except jwt.InvalidTokenError:
+        return False
+
+    join_room(f"user_{uid}")                   # every user sits in their own room
+    emit("ready")                              # optional ack
 
 # overenia JWT tokenu
 def token_required(f):
@@ -616,9 +637,37 @@ def like_dislike_accommodation():
                 cursor.execute("DELETE FROM liked WHERE uid = %s AND aid = %s", (uid, aid))
                 message = 'Unliked accommodation'
             else:
-                # Inak pridaj
-                cursor.execute("INSERT INTO liked (uid, aid) VALUES (%s, %s)", (uid, aid))
-                message = 'Liked accommodation'
+                if exists:
+                    cursor.execute(
+                        "DELETE FROM liked WHERE uid = %s AND aid = %s",
+                        (uid, aid)
+                    )
+                    message = 'Unliked accommodation'
+                else:
+                    cursor.execute(
+                        "INSERT INTO liked (uid, aid) VALUES (%s, %s)",
+                        (uid, aid)
+                    )
+                    message = 'Liked accommodation'
+
+                    # -------  push real-time notif to the owner  -------
+                    cursor.execute(
+                        "SELECT owner_id FROM accommodations WHERE aid = %s",
+                        (aid,)
+                    )
+                    owner_id_row = cursor.fetchone()
+                    if owner_id_row:
+                        owner_id = owner_id_row[0]
+                        if owner_id != uid:  # don’t notify yourself
+                            socketio.emit(
+                                "like_notification",
+                                {
+                                    "aid": aid,
+                                    "actor": uid,  # who pressed Like
+                                    "ts": datetime.datetime.utcnow().isoformat() + "Z"
+                                },
+                                room=f"user_{owner_id}"
+                            )
 
             connection.commit()
 
@@ -1801,5 +1850,5 @@ def get_accommodation_image(aid, image_index):
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 
 # Spustenie servera
-if __name__ == '__main__':
-    app.run(debug=False, port=5001)
+if __name__ == "__main__":
+    socketio.run(app, host="0.0.0.0", port=5001)
