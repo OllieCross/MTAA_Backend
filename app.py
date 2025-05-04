@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify, abort, Response
 from flasgger import Swagger, swag_from
 import psycopg2
 import requests
-
+#from flask_cors import CORS #zakomentovat pre olivera
 
 # Načítanie credentials z .env súboru
 load_dotenv()
@@ -20,6 +20,7 @@ app.config['SWAGGER'] = {'title': 'Login API', 'uiversion': 3}
 swagger = Swagger(app)
 
 app = Flask(__name__)
+#CORS(app) #zakomentovat pre olivera
 
 # overenia JWT tokenu
 def token_required(f):
@@ -1650,6 +1651,8 @@ def accommodation_confirmation(aid):
 })
 @token_required
 def main_screen_accommodations():
+    uid = request.user['uid']  # z JWT tokenu
+
     try:
         with connection.cursor() as cursor:
             query = """
@@ -1658,23 +1661,26 @@ def main_screen_accommodations():
                     a.name,
                     a.price_per_night,
                     a.location_city,
-                    a.location_country
+                    a.location_country,
+                    CASE WHEN l.aid IS NOT NULL THEN TRUE ELSE FALSE END AS is_liked
                 FROM accommodations a
+                LEFT JOIN liked l ON a.aid = l.aid AND l.uid = %s
                 ORDER BY RANDOM()
                 LIMIT 5;
             """
-            cursor.execute(query)
+            cursor.execute(query, (uid,))
             accommodations = cursor.fetchall()
 
-            result = [
-                {
-                    "aid": aid,
-                    "name": name,
-                    "price_per_night": price,
-                    "location": f"{city}, {country}"
-                }
-                for aid, name, price, city, country in accommodations
-            ]
+        result = [
+            {
+                "aid": aid,
+                "name": name,
+                "price_per_night": price,
+                "location": f"{city}, {country}",
+                "is_liked": is_liked
+            }
+            for aid, name, price, city, country, is_liked in accommodations
+        ]
 
         return jsonify({"success": True, "results": result}), 200
 
