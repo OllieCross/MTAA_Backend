@@ -1,3 +1,5 @@
+import eventlet;
+eventlet.monkey_patch()
 import os
 import jwt
 import datetime
@@ -8,7 +10,6 @@ from flask import Flask, request, jsonify, abort, Response
 from flasgger import Swagger, swag_from
 import psycopg2
 import requests
-import eventlet; eventlet.monkey_patch()
 from flask_socketio import SocketIO, join_room, emit
 #from flask_cors import CORS #zakomentovat pre olivera
 
