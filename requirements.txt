@@ -7,4 +7,4 @@ requests
 flasgger
 flask-socketio
 eventlet
-redis
+gunicorn

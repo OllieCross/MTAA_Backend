@@ -1,5 +1,7 @@
+version: "3.9"
+
 services:
-  web:
+  backend:
     container_name: flask_api
     build:
       context: .
@@ -8,6 +10,11 @@ services:
       - "5001:5001"
     env_file:
       - .env
+    command: >
+      gunicorn -k eventlet -w 4
+      -b 0.0.0.0:5001
+      mtaa_backend:app
+    restart: unless-stopped
     networks:
       - MTAA_network
 

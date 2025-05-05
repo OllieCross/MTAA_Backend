@@ -1,48 +1,25 @@
-import eventlet;
-eventlet.monkey_patch()
+from flask import Flask, request, jsonify, abort, Response
+from flask_socketio import SocketIO, emit, join_room
+import eventlet; eventlet.monkey_patch()
 import os
 import jwt
 import datetime
 import bcrypt
 from functools import wraps
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, abort, Response
 from flasgger import Swagger, swag_from
 import psycopg2
 import requests
-from flask_socketio import SocketIO, join_room, emit
-#from flask_cors import CORS #zakomentovat pre olivera
 
 # Načítanie credentials z .env súboru
 load_dotenv()
 app = Flask(__name__)
-socketio = SocketIO(                                    # replaces plain app.run later
-    app,
-    cors_allowed_origins="*",
-    message_queue="redis://",   # comment this line if you don’t have Redis yet
-)
 SECRET_KEY = os.environ.get("SECRET_KEY")
 url = os.environ.get("DATABASE_URL")
 connection = psycopg2.connect(url)
 app.config['SWAGGER'] = {'title': 'Login API', 'uiversion': 3}
 swagger = Swagger(app)
-
-#CORS(app) #zakomentovat pre olivera
-
-@socketio.on("connect")
-def socket_connect():
-    token = request.args.get("token")          # Flutter client will send ?token=<JWT>
-    if not token:
-        return False                           # cancel the handshake → 401 on client
-
-    try:
-        data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        uid  = data["uid"]
-    except jwt.InvalidTokenError:
-        return False
-
-    join_room(f"user_{uid}")                   # every user sits in their own room
-    emit("ready")                              # optional ack
+socketio = SocketIO(app)
 
 # overenia JWT tokenu
 def token_required(f):
@@ -66,6 +43,52 @@ def token_required(f):
 
         return f(*args, **kwargs)
     return decorated
+
+@socketio.on("connect")
+def handle_connect():
+    token = request.args.get("token")
+    try:
+        data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+    except jwt.InvalidTokenError:
+        return False
+
+    uid = data["uid"]
+    join_room(f"user:{uid}")
+    print(f"User {uid} connected via WebSocket")
+
+@app.post("/register-push")
+@token_required
+def register_push():
+    token = request.json.get("token")
+    platform = request.json.get("platform")
+    with connection.cursor() as cur:
+        cur.execute("INSERT INTO push_tokens (uid, token, platform) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (uid, token) DO NOTHING",
+                    (request.user["uid"], token, platform))
+        connection.commit()
+    return "", 204
+
+def push_to_owner(owner_id, aid, action):
+    with connection.cursor() as cur:
+        cur.execute("SELECT token FROM push_tokens WHERE uid = %s LIMIT 1", (owner_id,))
+        row = cur.fetchone()
+    if not row:
+        return                              # owner has no token yet
+
+    device_token = row[0]
+    headers = {
+        "Authorization": f"key={os.environ['FCM_SERVER_KEY']}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "to": device_token,
+        "notification": {
+            "title": "Someone liked your place!",
+            "body": f"Accommodation #{aid} was {action}."
+        },
+        "data": {"aid": aid, "action": action}
+    }
+    requests.post("https://fcm.googleapis.com/fcm/send", json=payload, headers=headers, timeout=5)
 
 # Testovací endpoint
 @app.get("/default")
@@ -623,58 +646,46 @@ def like_dislike_accommodation():
     data = request.json
     aid = data.get('aid')
     uid = request.user['uid']
-
     if not aid:
         return jsonify({'success': False, 'message': 'Missing AID'}), 400
 
     try:
         with connection.cursor() as cursor:
-            # Over, či už existuje záznam
-            cursor.execute("SELECT * FROM liked WHERE uid = %s AND aid = %s", (uid, aid))
-            exists = cursor.fetchone()
+            # Who owns this accommodation?
+            cursor.execute("SELECT owner_id FROM accommodations WHERE aid = %s;", (aid,))
+            owner_row = cursor.fetchone()
+            if not owner_row:
+                return jsonify({'success': False, 'message': 'Accommodation not found'}), 404
+            owner_id = owner_row[0]
 
-            if exists:
-                # Ak existuje, odstráň
+            # Do we already like it?
+            cursor.execute("SELECT 1 FROM liked WHERE uid = %s AND aid = %s", (uid, aid))
+            already = cursor.fetchone() is not None
+
+            if already:
                 cursor.execute("DELETE FROM liked WHERE uid = %s AND aid = %s", (uid, aid))
-                message = 'Unliked accommodation'
+                action = "unliked"
             else:
-                if exists:
-                    cursor.execute(
-                        "DELETE FROM liked WHERE uid = %s AND aid = %s",
-                        (uid, aid)
-                    )
-                    message = 'Unliked accommodation'
-                else:
-                    cursor.execute(
-                        "INSERT INTO liked (uid, aid) VALUES (%s, %s)",
-                        (uid, aid)
-                    )
-                    message = 'Liked accommodation'
-
-                    # -------  push real-time notif to the owner  -------
-                    cursor.execute(
-                        "SELECT owner_id FROM accommodations WHERE aid = %s",
-                        (aid,)
-                    )
-                    owner_id_row = cursor.fetchone()
-                    if owner_id_row:
-                        owner_id = owner_id_row[0]
-                        if owner_id != uid:  # don’t notify yourself
-                            socketio.emit(
-                                "like_notification",
-                                {
-                                    "aid": aid,
-                                    "actor": uid,  # who pressed Like
-                                    "ts": datetime.datetime.utcnow().isoformat() + "Z"
-                                },
-                                room=f"user_{owner_id}"
-                            )
+                cursor.execute("INSERT INTO liked (uid, aid) VALUES (%s, %s)", (uid, aid))
+                action = "liked"
 
             connection.commit()
 
-        return jsonify({'success': True, 'message': message, 'aid': aid}), 200
+        # real-time in-app event
+        socketio.emit(
+            "accommodation_liked",
+            {"aid": aid, "by": uid, "action": action},
+            room=f"user:{owner_id}"
+        )
+        # background push for offline owner
+        push_to_owner(owner_id, aid, action)
+
+        return jsonify({'success': True,
+                        'message': f'{action.capitalize()} accommodation',
+                        'aid': aid}), 200
 
     except Exception as e:
+        connection.rollback()
         print("Like error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
 @swag_from({
@@ -1852,4 +1863,4 @@ def get_accommodation_image(aid, image_index):
 
 # Spustenie servera
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5001)
+    socketio.run(host="0.0.0.0", port=5001)
