@@ -1,6 +1,6 @@
-from flask import Flask, request, jsonify, abort, Response
-from flask_socketio import SocketIO, emit, join_room
-import eventlet; eventlet.monkey_patch()
+from flask import Flask, request, jsonify, abort, Response, current_app
+from flask_socketio import SocketIO, join_room
+import eventlet; eventlet.monkey_patch(socket=True, select=True, thread=True, time=True, os=True)
 import os
 import jwt
 import datetime
@@ -9,14 +9,22 @@ from functools import wraps
 from dotenv import load_dotenv
 from flasgger import Swagger, swag_from
 import psycopg2
+from psycopg2 import pool
 import requests
 
-# Načítanie credentials z .env súboru
+# Load credentials from .env
 load_dotenv()
 app = Flask(__name__)
 SECRET_KEY = os.environ.get("SECRET_KEY")
-url = os.environ.get("DATABASE_URL")
-connection = psycopg2.connect(url)
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+# Initialize a threaded connection pool
+db_pool = pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=20,
+    dsn=DATABASE_URL
+)
+
 app.config['SWAGGER'] = {'title': 'Login API', 'uiversion': 3}
 swagger = Swagger(app)
 socketio = SocketIO(app)
@@ -45,7 +53,7 @@ def token_required(f):
     return decorated
 
 @socketio.on("connect")
-def handle_connect():
+def handle_connect(*args) -> bool | None:
     token = request.args.get("token")
     try:
         data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
@@ -54,41 +62,54 @@ def handle_connect():
 
     uid = data["uid"]
     join_room(f"user:{uid}")
-    print(f"User {uid} connected via WebSocket")
+    current_app.logger.info(f"User {uid} connected via WebSocket")
+socketio.on("connect")(handle_connect)
 
 @app.post("/register-push")
 @token_required
 def register_push():
     token = request.json.get("token")
     platform = request.json.get("platform")
-    with connection.cursor() as cur:
-        cur.execute("INSERT INTO push_tokens (uid, token, platform) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (uid, token) DO NOTHING",
-                    (request.user["uid"], token, platform))
-        connection.commit()
-    return "", 204
+    conn = db_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO push_tokens (uid, token, platform) VALUES (%s, %s, %s)"
+                " ON CONFLICT (uid, token) DO NOTHING",
+                (request.user["uid"], token, platform)
+            )
+        conn.commit()
+        return "", 204
+    except Exception as e:
+        conn.rollback()
+        current_app.logger.error(f"Push registration error: {e}")
+        return jsonify({'message': 'Server error'}), 500
 
 def push_to_owner(owner_id, aid, action):
-    with connection.cursor() as cur:
-        cur.execute("SELECT token FROM push_tokens WHERE uid = %s LIMIT 1", (owner_id,))
-        row = cur.fetchone()
-    if not row:
-        return                              # owner has no token yet
+    conn = db_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT token FROM push_tokens WHERE uid = %s LIMIT 1", (owner_id,))
+            row = cur.fetchone()
+        if not row:
+            return
+        device_token = row[0]
+    finally:
+        db_pool.putconn(conn)
 
-    device_token = row[0]
     headers = {
         "Authorization": f"key={os.environ['FCM_SERVER_KEY']}",
         "Content-Type": "application/json"
     }
     payload = {
         "to": device_token,
-        "notification": {
-            "title": "Someone liked your place!",
-            "body": f"Accommodation #{aid} was {action}."
-        },
+        "notification": {"title": "Someone liked your place!", "body": f"Accommodation #{aid} was {action}."},
         "data": {"aid": aid, "action": action}
     }
-    requests.post("https://fcm.googleapis.com/fcm/send", json=payload, headers=headers, timeout=5)
+    try:
+        requests.post("https://fcm.googleapis.com/fcm/send", json=payload, headers=headers, timeout=5)
+    except Exception as e:
+        current_app.logger.error(f"FCM send error: {e}")
 
 # Testovací endpoint
 @app.get("/default")
@@ -119,12 +140,8 @@ def push_to_owner(owner_id, aid, action):
 })
 @token_required
 def default():
-    user_data = request.user  # získané z tokenu
-    return jsonify({
-        "message": "Access granted",
-        "user_id": user_data['uid'],
-        "role": user_data['role']
-    }), 200
+    user_data = request.user
+    return jsonify({"message": "Access granted", "user_id": user_data['uid'], "role": user_data['role']}), 200
 
 # LOGIN s generovaním JWT tokenu
 @app.route('/login', methods=['POST'])
@@ -171,33 +188,29 @@ def login():
     email = data.get('email')
     password = data.get('password')
 
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT uid, password, role FROM users WHERE email = %s;",
-                (email,)
-            )
-            user = cursor.fetchone()
-
-        if user:
-            uid, hashed_pw, role = user
-
-            if bcrypt.checkpw(password.encode('utf-8'), hashed_pw.encode('utf-8')):
-                token = jwt.encode({
-                    'uid': uid,
-                    'role': role,
-                    'exp': datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
-                }, SECRET_KEY, algorithm='HS256')
-
-                return jsonify({'success': True, 'token': token}), 200
-            else:
-                return jsonify({'success': False, 'message': 'Invalid password'}), 401
-        else:
+        with conn.cursor() as cur:
+            cur.execute("SELECT uid, password, role FROM users WHERE email = %s;", (email,))
+            user = cur.fetchone()
+        if not user:
             return jsonify({'success': False, 'message': 'User not found'}), 404
 
+        uid, hashed_pw, role = user
+        if not bcrypt.checkpw(password.encode('utf-8'), hashed_pw.encode('utf-8')):
+            return jsonify({'success': False, 'message': 'Invalid password'}), 401
+
+        token = jwt.encode({
+            'uid': uid,
+            'role': role,
+            'exp': datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+        }, SECRET_KEY, algorithm='HS256')
+        return jsonify({'success': True, 'token': token}), 200
     except Exception as e:
-        print("Error during login:", e)
+        current_app.logger.error(f"Login error: {e}")
         return jsonify({'success': False, 'message': 'Server error'}), 500
+    finally:
+        db_pool.putconn(conn)
 
 @app.route('/delete-accommodation/<int:aid>', methods=['DELETE'])
 @swag_from({
@@ -240,8 +253,9 @@ def login():
 def delete_accommodation(aid):
     uid = request.user['uid']
 
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             # Skontroluj, či používateľ je vlastníkom ubytovania
             cursor.execute("SELECT * FROM accommodations WHERE aid = %s AND owner_id = %s;", (aid, uid))
             acc = cursor.fetchone()
@@ -253,13 +267,15 @@ def delete_accommodation(aid):
             cursor.execute("DELETE FROM pictures WHERE aid = %s;", (aid,))
             # Potom vymaž ubytovanie
             cursor.execute("DELETE FROM accommodations WHERE aid = %s;", (aid,))
-            connection.commit()
+            conn.commit()
 
         return jsonify({'success': True, 'message': f'Accommodation {aid} deleted'}), 200
 
     except Exception as e:
         print("Delete accommodation error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+    finally:
+        db_pool.putconn(conn)
 
 # REGISTRÁCIA používateľa
 @app.route('/register', methods=['POST'])
@@ -313,8 +329,9 @@ def register():
     password = data.get('password')
     role = data.get('role', 'guest')
 
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM users WHERE email = %s;", (email,))
             existing_user = cursor.fetchone()
 
@@ -327,13 +344,15 @@ def register():
                 "INSERT INTO users (email, password, role) VALUES (%s, %s, %s);",
                 (email, hashed_pw, role)
             )
-            connection.commit()
+            conn.commit()
 
         return jsonify({'success': True, 'message': 'Registration successful'}), 201
 
     except Exception as e:
         print("Error during registration:", e)
         return jsonify({'success': False, 'message': 'Server error'}), 500
+    finally:
+        db_pool.putconn(conn)
 
 def geocode_address_full(address):
     url = "https://nominatim.openstreetmap.org/search"
@@ -469,7 +488,7 @@ def add_accommodation():
         if not images or len(images) < 3:
             return jsonify({'success': False, 'message': 'At least 3 images are required'}), 400
 
-        conn = psycopg2.connect(url)
+        conn = db_pool.getconn()
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO accommodations
@@ -493,6 +512,8 @@ def add_accommodation():
     except Exception as e:
         print("Accommodation upload error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+    finally:
+        db_pool.putconn(conn)
 
 @app.route('/edit-accommodation/<int:aid>', methods=['PUT'])
 @swag_from({
@@ -586,6 +607,7 @@ def add_accommodation():
 def edit_accommodation(aid):
     uid = request.user['uid']
 
+    conn = db_pool.getconn()
     try:
         name = request.form.get("name")
         max_guests = request.form.get("guests")
@@ -603,7 +625,7 @@ def edit_accommodation(aid):
         if not images or len(images) < 3:
             return jsonify({'success': False, 'message': 'At least 3 images are required'}), 400
 
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM accommodations WHERE aid = %s AND owner_id = %s;", (aid, uid))
             accommodation = cursor.fetchone()
 
@@ -632,13 +654,15 @@ def edit_accommodation(aid):
             for img in images:
                 cursor.execute("INSERT INTO pictures (aid, image) VALUES (%s, %s);", (aid, psycopg2.Binary(img.read())))
 
-            connection.commit()
+            conn.commit()
 
         return jsonify({'success': True, 'message': 'Accommodation updated', 'aid': aid}), 200
 
     except Exception as e:
         print("Edit accommodation error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+    finally:
+        db_pool.putconn(conn)
 
 @app.route('/like_dislike', methods=['POST'])
 @token_required
@@ -649,8 +673,9 @@ def like_dislike_accommodation():
     if not aid:
         return jsonify({'success': False, 'message': 'Missing AID'}), 400
 
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             # Who owns this accommodation?
             cursor.execute("SELECT owner_id FROM accommodations WHERE aid = %s;", (aid,))
             owner_row = cursor.fetchone()
@@ -669,7 +694,7 @@ def like_dislike_accommodation():
                 cursor.execute("INSERT INTO liked (uid, aid) VALUES (%s, %s)", (uid, aid))
                 action = "liked"
 
-            connection.commit()
+            conn.commit()
 
         # real-time in-app event
         socketio.emit(
@@ -685,9 +710,11 @@ def like_dislike_accommodation():
                         'aid': aid}), 200
 
     except Exception as e:
-        connection.rollback()
+        conn.rollback()
         print("Like error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+    finally:
+        db_pool.putconn(conn)
 @swag_from({
     'tags': ['Interactions'],
     'summary': 'Toggle like/dislike for an accommodation',
@@ -754,7 +781,6 @@ def like_dislike_accommodation():
         }
     }
 })
-
 @app.route('/liked-accommodations', methods=['GET'])
 @swag_from({
     'tags': ['Accommodations'],
@@ -801,8 +827,10 @@ def like_dislike_accommodation():
 @token_required
 def get_liked_accommodations():
     uid = request.user['uid']
+    conn = db_pool.getconn()
+
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT 
                     a.aid,
@@ -832,6 +860,9 @@ def get_liked_accommodations():
     except Exception as e:
         print("Get liked accommodations error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+
+    finally:
+        db_pool.putconn(conn)
 
 # PRE GPS POZIADAVKU
 @app.route('/get-address', methods=['POST'])
@@ -1004,8 +1035,10 @@ def get_address_from_coordinates():
 })
 @token_required
 def get_accommodation_details(aid):
+
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             # Získaj základné info o ubytovaní + priemerné hodnotenie
             cursor.execute("""
                 SELECT 
@@ -1049,6 +1082,8 @@ def get_accommodation_details(aid):
     except Exception as e:
         print("Get accommodation detail error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+    finally:
+        db_pool.putconn(conn)
 
 @app.route('/make-reservation', methods=['POST'])
 @swag_from({
@@ -1152,8 +1187,9 @@ def make_reservation():
     if not all([aid, date_from, date_to]):
         return jsonify({'success': False, 'message': 'Missing required fields'}), 400
 
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             # Over, či dátumy nie sú kolízne s existujúcou rezerváciou
             cursor.execute("""
                 SELECT * FROM reservations
@@ -1172,13 +1208,15 @@ def make_reservation():
                 RETURNING rid;
             """, (aid, date_from, date_to, uid))
             rid = cursor.fetchone()[0]
-            connection.commit()
+            conn.commit()
 
         return jsonify({'success': True, 'message': 'Reservation created', 'rid': rid}), 201
 
     except Exception as e:
         print("Make reservation error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+    finally:
+        db_pool.putconn(conn)
 
 @app.route('/delete-reservation/<int:rid>', methods=['DELETE'])
 @swag_from({
@@ -1241,8 +1279,9 @@ def make_reservation():
 def delete_reservation(rid):
     uid = request.user['uid']
 
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             # Over, či rezerváciu vlastní prihlásený používateľ
             cursor.execute("SELECT * FROM reservations WHERE rid = %s AND reserved_by = %s;", (rid, uid))
             reservation = cursor.fetchone()
@@ -1252,13 +1291,15 @@ def delete_reservation(rid):
 
             # Vymaž rezerváciu
             cursor.execute("DELETE FROM reservations WHERE rid = %s;", (rid,))
-            connection.commit()
+            conn.commit()
 
         return jsonify({'success': True, 'message': f'Reservation {rid} deleted'}), 200
 
     except Exception as e:
         print("Delete reservation error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+    finally:
+        db_pool.putconn(conn)
 
 @app.route('/my-accommodations', methods=['GET'])
 @swag_from({
@@ -1306,9 +1347,9 @@ def delete_reservation(rid):
 @token_required
 def get_my_accommodations():
     uid = request.user['uid']
-
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT 
                     a.aid,
@@ -1335,6 +1376,9 @@ def get_my_accommodations():
     except Exception as e:
         print("Get my accommodations error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+    finally:
+        db_pool.putconn(conn)
+
 
 @app.route('/my-reservations', methods=['GET'])
 @swag_from({
@@ -1388,9 +1432,9 @@ def get_my_accommodations():
 @token_required
 def get_my_reservations():
     uid = request.user['uid']
-
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT 
                     r.rid,
@@ -1417,6 +1461,8 @@ def get_my_reservations():
     except Exception as e:
         print("Get my reservations error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+    finally:
+        db_pool.putconn(conn)
 
 @app.route('/search-accommodations', methods=['POST'])
 @swag_from({
@@ -1517,8 +1563,9 @@ def search_accommodations():
         lat, lon, _, _ = geocode_address_full(location)
         latitude, longitude = lat, lon
 
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             query = """
                 SELECT
                     a.aid,
@@ -1577,13 +1624,15 @@ def search_accommodations():
         return jsonify({"success": True, "results": result}), 200
 
     except Exception as e:
-        connection.rollback()
+        conn.rollback()
         print("Search accommodations error:", e)
         return jsonify({
             "success": False,
             "message": "Server error",
             "error": str(e)
         }), 500
+    finally:
+        db_pool.putconn(conn)
 
 @app.route('/accommodation-confirmation/<int:aid>', methods=['GET'])
 @swag_from({
@@ -1645,8 +1694,9 @@ def search_accommodations():
 })
 @token_required
 def accommodation_confirmation(aid):
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT price_per_night, iban FROM accommodations WHERE aid = %s;
             """, (aid,))
@@ -1661,6 +1711,8 @@ def accommodation_confirmation(aid):
     except Exception as e:
         print("Accommodation confirmation error:", e)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+    finally:
+        db_pool.putconn(conn)
 
 @app.route('/main-screen-accommodations', methods=['GET'])
 @swag_from({
@@ -1712,10 +1764,11 @@ def accommodation_confirmation(aid):
 })
 @token_required
 def main_screen_accommodations():
-    uid = request.user['uid']  # z JWT tokenu
+    uid = request.user['uid']
+    conn = db_pool.getconn()
 
     try:
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             query = """
                 SELECT
                     a.aid,
@@ -1746,13 +1799,15 @@ def main_screen_accommodations():
         return jsonify({"success": True, "results": result}), 200
 
     except Exception as e:
-        connection.rollback()
+        conn.rollback()
         print("Main screen accommodations error:", e)
         return jsonify({
             "success": False,
             "message": "Server error",
             "error": str(e)
         }), 500
+    finally:
+        db_pool.putconn(conn)
 
 @app.route('/accommodations/<int:aid>/image/<int:image_index>', methods=['GET'])
 @swag_from({
@@ -1832,34 +1887,37 @@ def main_screen_accommodations():
         }
     ]
 })
-@token_required  # Ak je potrebná autentifikácia aj pre prístup k obrázkom
+@token_required
 def get_accommodation_image(aid, image_index):
-    # Overenie, že index obrázku je platný (1, 2, 3, ...)
     if image_index < 1:
-        abort(400, description="Zlý Parameter image_index")
+        abort(400, description="Invalid image_index")
 
+    conn = db_pool.getconn()
     try:
-        with connection.cursor() as cursor:
-            # Vypočítame offset pre SQL dotaz (prvý obrázok má offset 0)
+        with conn.cursor() as cur:
             offset = image_index - 1
-            cursor.execute("""
+            cur.execute(
+                """
                 SELECT image
-                FROM pictures 
-                WHERE aid = %s 
-                ORDER BY pid ASC 
+                FROM pictures
+                WHERE aid = %s
+                ORDER BY pid ASC
                 LIMIT 1 OFFSET %s;
-            """, (aid, offset))
-            result = cursor.fetchone()
+                """,
+                (aid, offset)
+            )
+            row = cur.fetchone()
+        if not row:
+            abort(404, description="Image not found")
 
-        if result:
-            image, = result  # Rozbalenie tuple
-            default_mimetype = 'image/jpeg'  # Použite štandardný MIME typ pre JPEG obrázky
-            return Response(image, mimetype=default_mimetype)
-        else:
-            abort(404, description="Obrázok nebol nájdený")
+        resp = Response(row[0], mimetype='image/jpeg')
+        resp.headers['Cache-Control'] = 'public, max-age=3600'
+        return resp
     except Exception as e:
-        print("Get accommodation image error:", e)
-        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
+        current_app.logger.error(f"Error fetching image aid={aid} idx={image_index}: {e}")
+        abort(500, description="Server error")
+    finally:
+        db_pool.putconn(conn)
 
 # Spustenie servera
 if __name__ == "__main__":

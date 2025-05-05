@@ -11,9 +11,8 @@ services:
     env_file:
       - .env
     command: >
-      gunicorn -k eventlet -w 4
-      -b 0.0.0.0:5001
-      mtaa_backend:app
+      gunicorn -k eventlet -w 4 -b 0.0.0.0:5001
+      app:app
     restart: unless-stopped
     networks:
       - MTAA_network
