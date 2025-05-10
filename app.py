@@ -12,6 +12,7 @@ import psycopg2
 from psycopg2 import pool
 import requests
 import logging
+from datetime import date
 
 load_dotenv()
 app = Flask(__name__)
@@ -1901,6 +1902,28 @@ def get_accommodation_image(aid, image_index):
         abort(500, description="Server error")
     finally:
         db_pool.putconn(conn)
+
+@app.route('/upcoming_reservations', methods=['GET'])
+def upcoming_reservations():
+    auth = request.headers.get('Authorization', '')
+    token = auth.split(' ')[1] if ' ' in auth else ''
+    payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+    user_id = payload['user_id']
+    today = date.today()
+    conn = db_pool.getconn()
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT "From", "To" FROM reservations WHERE reserved_by = %s AND "From" >= %s ORDER BY "From"', (user_id, today))
+        rows = cur.fetchall()
+        conn.close()
+        data = [{'from': r[0].isoformat(), 'to': r[1].isoformat()} for r in rows]
+        return jsonify(data), 200
+    except Exception as e:
+        current_app.logger.error(f"Error")
+        abort(500, description="Server error")
+    finally:
+        db_pool.putconn(conn)
+
 
 if __name__ == "__main__":
     socketio.run(host="0.0.0.0", port=5001)
