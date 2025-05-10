@@ -12,13 +12,11 @@ import psycopg2
 from psycopg2 import pool
 import requests
 
-# Load credentials from .env
 load_dotenv()
 app = Flask(__name__)
 SECRET_KEY = os.environ.get("SECRET_KEY")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# Initialize a threaded connection pool
 db_pool = pool.ThreadedConnectionPool(
     minconn=1,
     maxconn=20,
@@ -29,7 +27,6 @@ app.config['SWAGGER'] = {'title': 'Login API', 'uiversion': 3}
 swagger = Swagger(app)
 socketio = SocketIO(app)
 
-# overenia JWT tokenu
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -63,55 +60,14 @@ def handle_connect(*args) -> bool | None:
     uid = data["uid"]
     join_room(f"user:{uid}")
     current_app.logger.info(f"User {uid} connected via WebSocket")
-socketio.on("connect")(handle_connect)
 
-@app.post("/register-push")
-@token_required
-def register_push():
-    token = request.json.get("token")
-    platform = request.json.get("platform")
-    conn = db_pool.getconn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO push_tokens (uid, token, platform) VALUES (%s, %s, %s)"
-                " ON CONFLICT (uid, token) DO NOTHING",
-                (request.user["uid"], token, platform)
-            )
-        conn.commit()
-        return "", 204
-    except Exception as e:
-        conn.rollback()
-        current_app.logger.error(f"Push registration error: {e}")
-        return jsonify({'message': 'Server error'}), 500
+def push_to_owner(owner_id: int, text: str) -> None:
+    socketio.emit(
+        "accommodation_liked",
+        {"message": text},
+        room=f"user:{owner_id}",
+    )
 
-def push_to_owner(owner_id, aid, action):
-    conn = db_pool.getconn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT token FROM push_tokens WHERE uid = %s LIMIT 1", (owner_id,))
-            row = cur.fetchone()
-        if not row:
-            return
-        device_token = row[0]
-    finally:
-        db_pool.putconn(conn)
-
-    headers = {
-        "Authorization": f"key={os.environ['FCM_SERVER_KEY']}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "to": device_token,
-        "notification": {"title": "Someone liked your place!", "body": f"Accommodation #{aid} was {action}."},
-        "data": {"aid": aid, "action": action}
-    }
-    try:
-        requests.post("https://fcm.googleapis.com/fcm/send", json=payload, headers=headers, timeout=5)
-    except Exception as e:
-        current_app.logger.error(f"FCM send error: {e}")
-
-# Testovací endpoint
 @app.get("/default")
 @swag_from({
     'tags': ['Test'],
@@ -143,7 +99,6 @@ def default():
     user_data = request.user
     return jsonify({"message": "Access granted", "user_id": user_data['uid'], "role": user_data['role']}), 200
 
-# LOGIN s generovaním JWT tokenu
 @app.route('/login', methods=['POST'])
 @swag_from({
     'tags': ['Authentication'],
@@ -277,7 +232,6 @@ def delete_accommodation(aid):
     finally:
         db_pool.putconn(conn)
 
-# REGISTRÁCIA používateľa
 @app.route('/register', methods=['POST'])
 @swag_from({
     'tags': ['Authentication'],
@@ -379,7 +333,6 @@ def geocode_address_full(address):
     else:
         return None, None, "", ""
 
-# Pridanie ubytovania
 @app.route('/add-accommodation', methods=['POST'])
 @swag_from({
     'tags': ['Accommodations'],
@@ -665,56 +618,6 @@ def edit_accommodation(aid):
         db_pool.putconn(conn)
 
 @app.route('/like_dislike', methods=['POST'])
-@token_required
-def like_dislike_accommodation():
-    data = request.json
-    aid = data.get('aid')
-    uid = request.user['uid']
-    if not aid:
-        return jsonify({'success': False, 'message': 'Missing AID'}), 400
-
-    conn = db_pool.getconn()
-    try:
-        with conn.cursor() as cursor:
-            # Who owns this accommodation?
-            cursor.execute("SELECT owner_id FROM accommodations WHERE aid = %s;", (aid,))
-            owner_row = cursor.fetchone()
-            if not owner_row:
-                return jsonify({'success': False, 'message': 'Accommodation not found'}), 404
-            owner_id = owner_row[0]
-
-            # Do we already like it?
-            cursor.execute("SELECT 1 FROM liked WHERE uid = %s AND aid = %s", (uid, aid))
-            already = cursor.fetchone() is not None
-
-            if already:
-                cursor.execute("DELETE FROM liked WHERE uid = %s AND aid = %s", (uid, aid))
-                action = "unliked"
-            else:
-                cursor.execute("INSERT INTO liked (uid, aid) VALUES (%s, %s)", (uid, aid))
-                action = "liked"
-
-            conn.commit()
-
-        # real-time in-app event
-        socketio.emit(
-            "accommodation_liked",
-            {"aid": aid, "by": uid, "action": action},
-            room=f"user:{owner_id}"
-        )
-        # background push for offline owner
-        push_to_owner(owner_id, aid, action)
-
-        return jsonify({'success': True,
-                        'message': f'{action.capitalize()} accommodation',
-                        'aid': aid}), 200
-
-    except Exception as e:
-        conn.rollback()
-        print("Like error:", e)
-        return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
-    finally:
-        db_pool.putconn(conn)
 @swag_from({
     'tags': ['Interactions'],
     'summary': 'Toggle like/dislike for an accommodation',
@@ -781,6 +684,81 @@ def like_dislike_accommodation():
         }
     }
 })
+@token_required
+def like_dislike_accommodation() -> tuple[Response, int] | None:
+    data = request.json or {}
+    aid = data.get("aid")
+    liker_uid = request.user["uid"]
+
+    if not aid:
+        return jsonify({"success": False, "message": "Missing AID"}), 400
+
+    conn = db_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            # 1. Who owns it and what's its name?
+            cur.execute(
+                """
+                SELECT owner_id, name
+                FROM accommodations
+                WHERE aid = %s;
+                """,
+                (aid,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"success": False, "message": "Accommodation not found"}), 404
+            owner_id, acc_name = row
+
+            # 2. Get liker email
+            cur.execute("SELECT email FROM users WHERE uid = %s;", (liker_uid,))
+            liker_email_row = cur.fetchone()
+            liker_email = liker_email_row[0] if liker_email_row else "unknown@email"
+
+            # 3. Toggle like ↔ unlike
+            cur.execute("SELECT 1 FROM liked WHERE uid = %s AND aid = %s;", (liker_uid, aid))
+            already = cur.fetchone() is not None
+
+            if already:
+                cur.execute("DELETE FROM liked WHERE uid = %s AND aid = %s;", (liker_uid, aid))
+                action = "unliked"
+            else:
+                cur.execute("INSERT INTO liked (uid, aid) VALUES (%s, %s);", (liker_uid, aid))
+                action = "liked"
+
+        conn.commit()
+
+        # 4. Compose the sentence and push via WebSocket
+        text = f'Your accommodation "{acc_name}" was {action} by {liker_email}'
+        push_to_owner(owner_id, text)
+
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "message": f"{action.capitalize()} accommodation",
+                    "aid": aid,
+                }
+            ),
+            200,
+        )
+
+    except Exception as exc:
+        conn.rollback()
+        current_app.logger.error("Like/dislike error: %s", exc)
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "message": "Server error",
+                    "error": str(exc),
+                }
+            ),
+            500,
+        )
+    finally:
+        db_pool.putconn(conn)
+
 @app.route('/liked-accommodations', methods=['GET'])
 @swag_from({
     'tags': ['Accommodations'],
@@ -864,7 +842,6 @@ def get_liked_accommodations():
     finally:
         db_pool.putconn(conn)
 
-# PRE GPS POZIADAVKU
 @app.route('/get-address', methods=['POST'])
 @swag_from({
     'tags': ['Geocoding'],
@@ -1919,6 +1896,5 @@ def get_accommodation_image(aid, image_index):
     finally:
         db_pool.putconn(conn)
 
-# Spustenie servera
 if __name__ == "__main__":
     socketio.run(host="0.0.0.0", port=5001)
