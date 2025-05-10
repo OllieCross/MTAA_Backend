@@ -11,9 +11,11 @@ from flasgger import Swagger, swag_from
 import psycopg2
 from psycopg2 import pool
 import requests
+import logging
 
 load_dotenv()
 app = Flask(__name__)
+app.logger.setLevel(logging.DEBUG)
 SECRET_KEY = os.environ.get("SECRET_KEY")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -25,7 +27,7 @@ db_pool = pool.ThreadedConnectionPool(
 
 app.config['SWAGGER'] = {'title': 'Login API', 'uiversion': 3}
 swagger = Swagger(app)
-socketio = SocketIO(app)
+socketio = SocketIO(app,logger=True)
 
 def token_required(f):
     @wraps(f)
@@ -51,6 +53,7 @@ def token_required(f):
 
 @socketio.on("connect")
 def handle_connect(*args) -> bool | None:
+    current_app.logger.debug(f"WS connect: args={request.args}")
     token = request.args.get("token")
     try:
         data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
@@ -59,9 +62,10 @@ def handle_connect(*args) -> bool | None:
 
     uid = data["uid"]
     join_room(f"user:{uid}")
-    current_app.logger.info(f"User {uid} connected via WebSocket")
+    current_app.logger.debug(f"Joined room user:{uid}")
 
 def push_to_owner(owner_id: int, text: str) -> None:
+    current_app.logger.debug(f"push_to_owner → room=user:{owner_id}, message={text}")
     socketio.emit(
         "accommodation_liked",
         {"message": text},
@@ -690,6 +694,8 @@ def like_dislike_accommodation() -> tuple[Response, int] | None:
     aid = data.get("aid")
     liker_uid = request.user["uid"]
 
+    current_app.logger.debug(f"like_dislike called by uid={liker_uid}, aid={aid}")
+
     if not aid:
         return jsonify({"success": False, "message": "Missing AID"}), 400
 
@@ -710,12 +716,12 @@ def like_dislike_accommodation() -> tuple[Response, int] | None:
                 return jsonify({"success": False, "message": "Accommodation not found"}), 404
             owner_id, acc_name = row
 
-            # 2. Get liker email
             cur.execute("SELECT email FROM users WHERE uid = %s;", (liker_uid,))
             liker_email_row = cur.fetchone()
             liker_email = liker_email_row[0] if liker_email_row else "unknown@email"
 
-            # 3. Toggle like ↔ unlike
+            current_app.logger.debug(f"Owner={owner_id}, acc_name={acc_name}, liker_email={liker_email}")
+
             cur.execute("SELECT 1 FROM liked WHERE uid = %s AND aid = %s;", (liker_uid, aid))
             already = cur.fetchone() is not None
 
