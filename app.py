@@ -429,6 +429,7 @@ def geocode_address_full(address):
 })
 @token_required
 def add_accommodation():
+    conn = db_pool.getconn()
     try:
         name = request.form.get("name")
         max_guests = request.form.get("guests")
@@ -446,7 +447,6 @@ def add_accommodation():
         if not images or len(images) < 3:
             return jsonify({'success': False, 'message': 'At least 3 images are required'}), 400
 
-        conn = db_pool.getconn()
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO accommodations
