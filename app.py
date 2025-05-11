@@ -1906,29 +1906,43 @@ def get_accommodation_image(aid, image_index):
 @app.route('/upcoming_reservations', methods=['GET'])
 @token_required
 def upcoming_reservations():
+    current_app.logger.debug("→ entered upcoming_reservations")
+
     payload = request.user
+    current_app.logger.debug("JWT payload: %r", payload)
 
     user_id = payload.get('user_id')
     if not user_id:
+        current_app.logger.warning("Missing user_id in token payload")
         return jsonify({'message': 'Invalid token: user_id claim missing'}), 401
+    current_app.logger.debug("Authenticated user_id=%s", user_id)
 
     today = date.today()
+    current_app.logger.debug("Using date filter from %s onward", today)
+
     conn = db_pool.getconn()
     try:
         cur = conn.cursor()
-        cur.execute(
+        query = (
             'SELECT "From", "To" '
             'FROM reservations '
             'WHERE reserved_by = %s AND "From" >= %s '
-            'ORDER BY "From"',
-            (user_id, today)
+            'ORDER BY "From"'
         )
-        rows = cur.fetchall()
+        current_app.logger.debug("Executing SQL: %s with params (%s, %s)", query, user_id, today)
+        cur.execute(query, (user_id, today))
 
-        data = [
-            {'from': r[0].isoformat(), 'to': r[1].isoformat()}
-            for r in rows
-        ]
+        rows = cur.fetchall()
+        current_app.logger.debug("SQL returned %d rows", len(rows))
+
+        data = []
+        for idx, (start, end) in enumerate(rows, 1):
+            iso_from = start.isoformat()
+            iso_to   = end.isoformat()
+            current_app.logger.debug(" Row %d: from=%s to=%s", idx, iso_from, iso_to)
+            data.append({'from': iso_from, 'to': iso_to})
+
+        current_app.logger.debug("Returning %d reservations", len(data))
         return jsonify(data), 200
 
     except Exception as e:
