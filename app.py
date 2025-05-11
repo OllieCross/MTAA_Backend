@@ -471,7 +471,7 @@ def add_accommodation():
             print(f"[DEBUG] New accommodation ID: {aid}")
 
             for img in images:
-                print(f"[DEBUG] Inserting image {img} for accommodation ID {aid}, size: {len(img)} bytes")
+                print(f"[DEBUG] Inserting images for accommodation ID {aid})")
                 cur.execute("INSERT INTO pictures (aid, image) VALUES (%s, %s);", (aid, psycopg2.Binary(img.read())))
 
             conn.commit()
