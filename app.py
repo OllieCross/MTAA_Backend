@@ -1911,7 +1911,7 @@ def upcoming_reservations():
     payload = request.user
     current_app.logger.debug("JWT payload: %r", payload)
 
-    user_id = payload.get('user_id')
+    user_id = payload.get('uid')
     if not user_id:
         current_app.logger.warning("Missing user_id in token payload")
         return jsonify({'message': 'Invalid token: user_id claim missing'}), 401
