@@ -429,7 +429,9 @@ def geocode_address_full(address):
 })
 @token_required
 def add_accommodation():
+    print("[DEBUG] add_accommodation() called for user ID:", request.user.get('uid'))
     conn = db_pool.getconn()
+    print("[DEBUG] Obtained DB connection:", conn)
     try:
         name = request.form.get("name")
         max_guests = request.form.get("guests")
@@ -439,15 +441,22 @@ def add_accommodation():
         iban = request.form.get("iban")  # Pridanie IBAN
         images = request.files.getlist("images")
 
+        print(f"[DEBUG] Form inputs - name: {name}, guests: {max_guests}, price: {price}, address: {address}, iban: {iban}")
+        print(f"[DEBUG] Number of images received: {len(images)}")
+
         latitude, longitude, location_city, location_country = geocode_address_full(address)
+        print(f"[DEBUG] Geocoded address '{address}' to: latitude={latitude}, longitude={longitude}, city={location_city}, country={location_country}")
 
         if not all([name, location_city, location_country, max_guests, price, latitude, longitude, description, iban]):
+            print("[DEBUG] Validation failed - missing one or more required fields")
             return jsonify({'success': False, 'message': 'Missing required fields'}), 400
 
         if not images or len(images) < 3:
+            print("[DEBUG] Validation failed - insufficient images")
             return jsonify({'success': False, 'message': 'At least 3 images are required'}), 400
 
         with conn.cursor() as cur:
+            print("[DEBUG] Executing INSERT into accommodations table")
             cur.execute("""
                 INSERT INTO accommodations
                 (name, location_city, location_country, owner_id, max_guests, latitude, longitude, price_per_night, description, iban)
@@ -459,19 +468,27 @@ def add_accommodation():
                 price, description, iban
             ))
             aid = cur.fetchone()[0]
+            print(f"[DEBUG] New accommodation ID: {aid}")
 
             for img in images:
+                print(f"[DEBUG] Inserting image {img} for accommodation ID {aid}, size: {len(img)} bytes")
                 cur.execute("INSERT INTO pictures (aid, image) VALUES (%s, %s);", (aid, psycopg2.Binary(img.read())))
 
             conn.commit()
+            print("[DEBUG] Transaction committed successfully")
 
         return jsonify({'success': True, 'message': 'Accommodation added', 'aid': aid}), 201
-
     except Exception as e:
         print("Accommodation upload error:", e)
+        try:
+            conn.rollback()
+            print("[DEBUG] Transaction rolled back due to error")
+        except Exception as rollback_err:
+            print("[ERROR] Rollback failed:", rollback_err)
         return jsonify({'success': False, 'message': 'Server error', 'error': str(e)}), 500
     finally:
         db_pool.putconn(conn)
+        print("[DEBUG] Returned DB connection to the pool")
 
 @app.route('/edit-accommodation/<int:aid>', methods=['PUT'])
 @swag_from({
