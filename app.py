@@ -286,7 +286,7 @@ def register():
     data = request.json
     email = data.get('email')
     password = data.get('password')
-    role = data.get('role', 'guest')
+    role = data.get('role', 'owner')
 
     conn = db_pool.getconn()
     try:
