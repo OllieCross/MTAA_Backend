@@ -474,6 +474,7 @@ def add_accommodation():
                 print(f"[DEBUG] Inserting images for accommodation ID {aid})")
                 cur.execute("INSERT INTO pictures (aid, image) VALUES (%s, %s);", (aid, psycopg2.Binary(img.read())))
 
+            cur.execute("UPDATE users SET role = 'owner'::user_role WHERE uid = %s;", (request.user['uid'],))
             conn.commit()
             print("[DEBUG] Transaction committed successfully")
 
